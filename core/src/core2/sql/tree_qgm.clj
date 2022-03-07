@@ -259,37 +259,33 @@
   (let [q (fn [& args])
         f (fn [db]
             (-> db
-                (trip/transact (concat
-                                (->> (for [[q] (q '{:find [q]
-                                                    :where [[q :qgm.quantifier/type :qgm.quantifier.type/all]]}
-                                                  db)]
-                                       [[:db/retract q :qgm.quantifier/type :qgm.quantifier.type/all]
-                                        [:db/assert q :qgm.quantifier/type :qgm.quantifier.type/anti-existential]])
-                                     (apply concat))
-
-                                (->> (for [[p q e] (q '{:find [p q e]
-                                                        :where [[p :qgm.predicate/quantifiers q]
-                                                                [q :qgm.quantifier/type :qgm.quantifier.type/all]
-                                                                [p :qgm.predicate/expression e]]}
-                                                      db)
-                                           :let [[head-cols body-cols] (q '{:find [hc bc]
-                                                                            :in [$ q]
-                                                                            :where [[q :qgm.box.head/columns hc]]}
-                                                                          db q)]]
-
-                                       [[:db/retract p :qgm.predicate/expression e]
-                                        [:db/assert p :qgm.predicate/expression
-                                         (let [expr (w/postwalk-replace (zipmap (for [col head-cols]
-                                                                                  (symbol (str q "__" col)))
-                                                                                body-cols)
-                                                                        e)
-                                               qs (->> expr
-                                                       (into #{} (comp (keep (comp :column-reference meta))
-                                                                       (map (fn [{:keys [correlation-name table-id]}]
-                                                                              (symbol (str correlation-name "__" table-id)))))))]
-                                           {:qgm.predicate/expression expr
-                                            :qgm.predicate/quantifiers qs})]])
-                                     (apply concat))))))]
+                (trip/transact (->> (for [[qid head-cols body-cols] (q '{:find [qid head-cols body-cols]
+                                                                         :where [[qid :qgm.quantifier/type :qgm.quantifier.type/all]
+                                                                                 [qid :qgm.quantifier/ranges-over bid]
+                                                                                 [bid :qgm.box.head/columns head-cols]
+                                                                                 [bid :qgm.box.body/columns body-cols]]}
+                                                                       db)
+                                          :let [box-col-mapping (zipmap (for [col head-cols]
+                                                                          (symbol (str q "__" col)))
+                                                                        body-cols)]]
+                                      (into [[:db/retract q :qgm.quantifier/type :qgm.quantifier.type/all]
+                                             [:db/assert q :qgm.quantifier/type :qgm.quantifier.type/anti-existential]]
+                                            (->> (for [[pid expr] (q '{:find [pid expr]
+                                                                       :in [$ qid]
+                                                                       :where [[pid :qgm.predicate/quantifiers qid]
+                                                                               [pid :qgm.predicate/expression expr]]}
+                                                                     db qid)]
+                                                   [[:db/retract pid :qgm.predicate/expression expr]
+                                                    [:db/assert pid :qgm.predicate/expression
+                                                     (let [expr (w/postwalk-replace box-col-mapping expr)
+                                                           qs (->> expr
+                                                                   (into #{} (comp (keep (comp :column-reference meta))
+                                                                                   (map (fn [{:keys [correlation-name table-id]}]
+                                                                                          (symbol (str correlation-name "__" table-id)))))))]
+                                                       {:qgm.predicate/expression expr
+                                                        :qgm.predicate/quantifiers qs})]])
+                                                 (apply concat))))
+                                    (apply concat)))))]
     (fixpoint (some-fn f ...) {}))
 
   (defn- starburst-add-keys [ag]
