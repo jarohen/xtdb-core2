@@ -222,59 +222,67 @@
                        ::qid->pids (->preds-by-qid preds)})))
 
 (defn qgm-unzip [z]
-  {:tree (z/node z),
-   :preds (::preds (meta z)),
-   :qid->pids (::pid->qids (meta z))})
+  {:tree (z/node z), :preds (::preds (meta z))})
+
+(defn- existifying-quantifiers [ag]
+  (r/zcase ag
+    :qgm.quantifier/all
+    (let [[_ qid _cols ranges-over] (z/node ag)
+          {::keys [qid->pids preds]} (meta ag)
+          pids (qid->pids qid)
+          [_ box-opts] ranges-over
+          box-col-mapping (zipmap (for [col (:qgm.box.head/columns box-opts)]
+                                    (symbol (str qid "__" col)))
+                                  (:qgm.box.body/columns box-opts))]
+      (-> ag
+          (z/edit assoc 0 :qgm.quantifier/anti-existential)
+          (vary-meta update ::preds into
+                     (->> (for [pid pids]
+                            [pid (let [{:qgm.predicate/keys [expression]} (get preds pid)
+                                       expr (w/postwalk-replace box-col-mapping expression)
+                                       qs (->> expr
+                                               (into #{} (comp (keep (comp :column-reference meta))
+                                                               (map (fn [{:keys [correlation-name table-id]}]
+                                                                      (symbol (str correlation-name "__" table-id)))))))]
+                                   {:qgm.predicate/expression expr
+                                    :qgm.predicate/quantifiers qs})])
+                          (into {})))
+          (vary-meta (fn [{::keys [preds] :as m}]
+                       (-> m
+                           (assoc ::pid->qids (->preds-by-qid preds)))))))
+
+    nil))
 
 (comment
-  (declare qgm)
-
-  (defn- existifying-quantifiers [ag]
-    (r/zcase ag
-      :qgm.quantifier/all
-      (let [[_ qid _cols ranges-over] (z/node ag)
-            {::keys [qid->pids preds]} (meta ag)
-            pids (qid->pids qid)
-            [_ box-opts] ranges-over
-            box-col-mapping (zipmap (for [col (:qgm.box.head/columns box-opts)]
-                                      (symbol (str qid "__" col)))
-                                    (:qgm.box.body/columns box-opts))]
-        (-> ag
-            (z/edit assoc 0 :qgm.quantifier/anti-existential)
-            (vary-meta update ::preds into
-                       (->> (for [pid pids]
-                              [pid (let [{:qgm.predicate/keys [expression]} (get preds pid)
-                                         expr (w/postwalk-replace box-col-mapping expression)
-                                         qs (->> expr
-                                                 (into #{} (comp (keep (comp :column-reference meta))
-                                                                 (map (fn [{:keys [correlation-name table-id]}]
-                                                                        (symbol (str correlation-name "__" table-id)))))))]
-                                     {:qgm.predicate/expression expr
-                                      :qgm.predicate/quantifiers qs})])
-                            (into {})))
-            (vary-meta (fn [{::keys [preds] :as m}]
-                         (-> m
-                             (assoc ::pid->qids (->preds-by-qid preds)))))))
-
-      nil))
+  (declare fixpoint )
 
   (let [q (fn [& args])
         f (fn [db]
             (-> db
                 (trip/transact (concat
-                                (->> (for [[q] (q db '{:find [q]
-                                                       :where [[q :qgm.quantifier/type :qgm.quantifier.type/all]]})]
+                                (->> (for [[q] (q '{:find [q]
+                                                    :where [[q :qgm.quantifier/type :qgm.quantifier.type/all]]}
+                                                  db)]
                                        [[:db/retract q :qgm.quantifier/type :qgm.quantifier.type/all]
                                         [:db/assert q :qgm.quantifier/type :qgm.quantifier.type/anti-existential]])
                                      (apply concat))
 
-                                (->> (for [[p q e] (q db '{:find [p q e]
-                                                           :where [[p :qgm.predicate/quantifiers q]
-                                                                   [q :qgm.quantifier/type :qgm.quantifier.type/all]
-                                                                   [p :qgm.predicate/expression e]]})]
+                                (->> (for [[p q e] (q '{:find [p q e]
+                                                        :where [[p :qgm.predicate/quantifiers q]
+                                                                [q :qgm.quantifier/type :qgm.quantifier.type/all]
+                                                                [p :qgm.predicate/expression e]]}
+                                                      db)
+                                           :let [[head-cols body-cols] (q '{:find [hc bc]
+                                                                            :in [$ q]
+                                                                            :where [[q :qgm.box.head/columns hc]]}
+                                                                          db q)]]
+
                                        [[:db/retract p :qgm.predicate/expression e]
                                         [:db/assert p :qgm.predicate/expression
-                                         (let [expr (w/postwalk-replace box-col-mapping e)
+                                         (let [expr (w/postwalk-replace (zipmap (for [col head-cols]
+                                                                                  (symbol (str q "__" col)))
+                                                                                body-cols)
+                                                                        e)
                                                qs (->> expr
                                                        (into #{} (comp (keep (comp :column-reference meta))
                                                                        (map (fn [{:keys [correlation-name table-id]}]
@@ -309,6 +317,8 @@
 
       nil))
 
+  (declare qgm)
+
   (->> (qgm-zip (qgm (z/vector-zip (sql/parse "
 SELECT me.name FROM MovieExec me
 WHERE me.netWorth >= ALL (SELECT E.netWorth
@@ -330,11 +340,9 @@ FROM MovieExec E)"))))
         :preds (qgm-preds ag)}
        (s/assert :qgm/qgm)
 
-       #_qgm-zip
-       #_(r/innermost (r/choice-tp (some-fn existifying-quantifiers
-                                            starburst-add-keys)
-                                   r/fail-tp))
-       #_qgm-unzip))
+       qgm-zip
+       #_(r/innermost (r/choice-tp (some-fn decorrelate-qgm) r/fail-tp))
+       qgm-unzip))
 
 (defn plan-qgm [{:keys [tree preds]}]
   (let [qid->pids (->> (for [[pid pred] preds
