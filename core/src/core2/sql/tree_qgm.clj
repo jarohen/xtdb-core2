@@ -1,10 +1,13 @@
 (ns core2.sql.tree-qgm
   (:require [clojure.spec.alpha :as s]
+            [clojure.walk :as w]
             [clojure.zip :as z]
             [core2.logical-plan :as lp]
             [core2.rewrite :as r]
+            [core2.sql :as sql]
             [core2.sql.analyze :as sem]
             [core2.sql.plan :as plan]
+            [core2.trip :as trip]
             [instaparse.core :as insta]))
 
 ;; Query Graph Model
@@ -41,6 +44,7 @@
 (s/def :qgm.quantifier/type #{:qgm.quantifier/foreach
                               :qgm.quantifier/preserved-foreach
                               :qgm.quantifier/existential
+                              :qgm.quantifier/anti-existential ; TODO this doesn't exist elsewhere - how do they all represent 'NOT EXISTS'?
                               :qgm.quantifier/all})
 
 (s/def :qgm.quantifier/columns (s/coll-of symbol? :kind vector? :min-count 1))
@@ -182,17 +186,13 @@
 
          (into {}))))
 
-(defn qgm [ag]
-  (->> {:tree (->> ag
-                   (r/collect-stop
-                     (fn [ag]
-                       (r/zcase ag
-                                :query_specification [(qgm-box ag)]
-                                nil)))
-                   first)
-
-        :preds (qgm-preds ag)}
-       (s/assert :qgm/qgm)))
+(defn- ->preds-by-qid [preds]
+  (->> (for [[pid pred] preds
+             qid (:qgm.predicate/quantifiers pred)]
+         [qid pid])
+       (reduce (fn [acc [qid pid]]
+                 (update acc qid (fnil conj #{}) pid))
+               {})))
 
 (defn qgm-zip [{:keys [tree preds]}]
   (-> (z/zipper (fn [qgm]
@@ -211,20 +211,130 @@
 
                 (fn [node children]
                   (case (first node)
-                    :qgm.box/select (conj node (into {} (map (juxt second identity)) children))
+                    :qgm.box/select (assoc node 2 (into {} (map (juxt second identity)) children))
 
                     (:qgm.quantifier/all :qgm.quantifier/foreach :qgm.quantifier/existential)
-                    (into node children)))
+                    (assoc node 3 (first children))))
 
                 tree)
 
       (vary-meta into {::preds preds
-                       ::qid->pids (->> (for [[pid pred] preds
-                                              qid (:qgm.predicate/quantifiers pred)]
-                                          [qid pid])
-                                        (reduce (fn [acc [qid pid]]
-                                                  (update acc qid (fnil conj #{}) pid))
-                                                {}))})))
+                       ::qid->pids (->preds-by-qid preds)})))
+
+(defn qgm-unzip [z]
+  {:tree (z/node z),
+   :preds (::preds (meta z)),
+   :qid->pids (::pid->qids (meta z))})
+
+(comment
+  (declare qgm)
+
+  (defn- existifying-quantifiers [ag]
+    (r/zcase ag
+      :qgm.quantifier/all
+      (let [[_ qid _cols ranges-over] (z/node ag)
+            {::keys [qid->pids preds]} (meta ag)
+            pids (qid->pids qid)
+            [_ box-opts] ranges-over
+            box-col-mapping (zipmap (for [col (:qgm.box.head/columns box-opts)]
+                                      (symbol (str qid "__" col)))
+                                    (:qgm.box.body/columns box-opts))]
+        (-> ag
+            (z/edit assoc 0 :qgm.quantifier/anti-existential)
+            (vary-meta update ::preds into
+                       (->> (for [pid pids]
+                              [pid (let [{:qgm.predicate/keys [expression]} (get preds pid)
+                                         expr (w/postwalk-replace box-col-mapping expression)
+                                         qs (->> expr
+                                                 (into #{} (comp (keep (comp :column-reference meta))
+                                                                 (map (fn [{:keys [correlation-name table-id]}]
+                                                                        (symbol (str correlation-name "__" table-id)))))))]
+                                     {:qgm.predicate/expression expr
+                                      :qgm.predicate/quantifiers qs})])
+                            (into {})))
+            (vary-meta (fn [{::keys [preds] :as m}]
+                         (-> m
+                             (assoc ::pid->qids (->preds-by-qid preds)))))))
+
+      nil))
+
+  (let [q (fn [& args])
+        f (fn [db]
+            (-> db
+                (trip/transact (concat
+                                (->> (for [[q] (q db '{:find [q]
+                                                       :where [[q :qgm.quantifier/type :qgm.quantifier.type/all]]})]
+                                       [[:db/retract q :qgm.quantifier/type :qgm.quantifier.type/all]
+                                        [:db/assert q :qgm.quantifier/type :qgm.quantifier.type/anti-existential]])
+                                     (apply concat))
+
+                                (->> (for [[p q e] (q db '{:find [p q e]
+                                                           :where [[p :qgm.predicate/quantifiers q]
+                                                                   [q :qgm.quantifier/type :qgm.quantifier.type/all]
+                                                                   [p :qgm.predicate/expression e]]})]
+                                       [[:db/retract p :qgm.predicate/expression e]
+                                        [:db/assert p :qgm.predicate/expression
+                                         (let [expr (w/postwalk-replace box-col-mapping e)
+                                               qs (->> expr
+                                                       (into #{} (comp (keep (comp :column-reference meta))
+                                                                       (map (fn [{:keys [correlation-name table-id]}]
+                                                                              (symbol (str correlation-name "__" table-id)))))))]
+                                           {:qgm.predicate/expression expr
+                                            :qgm.predicate/quantifiers qs})]])
+                                     (apply concat))))))]
+    (fixpoint (some-fn f ...) {}))
+
+  (defn- starburst-add-keys [ag]
+    ;; if match worked...
+    (r/zmatch ag
+      [:qgm.box/select {:qgm.box.head/distinct? true} qs]
+      )
+
+    (r/zcase ag
+      :qgm.box/select
+      (let [[_ {:keys [qgm.box.head/distinct?] :as box-opts} qs] (z/node ag)]
+        (when distinct?
+          (->> ag
+               (z/replace [:qgm.box/select box-opts
+                           (->> (for [[qid [q-type _qid cols ranges-over :as q]] qs]
+                                  [qid (if (= q-type :qgm.quantifier/foreach)
+                                         (let [the-key :_id]
+                                           [q-type qid
+                                            (conj cols the-key)
+                                            (-> ranges-over
+                                                (update :qgm.box.head/columns conj the-key)
+                                                (update :qgm.box.body/columns conj the-key))])
+                                         q)])
+                                (into {}))]))))
+
+      nil))
+
+  (->> (qgm-zip (qgm (z/vector-zip (sql/parse "
+SELECT me.name FROM MovieExec me
+WHERE me.netWorth >= ALL (SELECT E.netWorth
+FROM MovieExec E)"))))
+       (r/innermost (r/choice-tp (some-fn existifying-quantifiers
+                                          starburst-add-keys)
+                                 r/fail-tp))
+       (qgm-unzip)))
+
+(defn qgm [ag]
+  (->> {:tree (->> ag
+                   (r/collect-stop
+                    (fn [ag]
+                      (r/zcase ag
+                        :query_specification [(qgm-box ag)]
+                        nil)))
+                   first)
+
+        :preds (qgm-preds ag)}
+       (s/assert :qgm/qgm)
+
+       #_qgm-zip
+       #_(r/innermost (r/choice-tp (some-fn existifying-quantifiers
+                                            starburst-add-keys)
+                                   r/fail-tp))
+       #_qgm-unzip))
 
 (defn plan-qgm [{:keys [tree preds]}]
   (let [qid->pids (->> (for [[pid pred] preds
