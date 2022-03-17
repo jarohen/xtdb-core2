@@ -304,14 +304,17 @@
                 (m acc)))))
         (m)))))
 
-(defn one-tu [f]
-  (fn [z]
-    (when-some [d (z/down z)]
-      (loop [z d]
-        (if-some [x (f z)]
-          x
-          (when-some [r (z/right z)]
-            (recur r)))))))
+(defn one-tu
+  ([f]
+   (fn [z]
+     (when-some [d (z/down z)]
+       (loop [z d]
+         (if-some [x (f z)]
+           x
+           (when-some [r (z/right z)]
+             (recur r)))))))
+  ([f z]
+   ((one-tu f) z)))
 
 (defn full-td-tu
   ([f]
