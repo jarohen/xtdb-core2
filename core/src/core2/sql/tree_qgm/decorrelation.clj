@@ -38,14 +38,14 @@
   (r/zmatch ag
     [:qgm.box/select box-opts
      [:qgm.quantifier/foreach q-opts inner-box]]
-    (let [{body-cols :qgm.box.body/columns} box-opts
+    (let [{cols :qgm.box/columns} box-opts
           {qid :qgm.quantifier/id} q-opts]
       ;; TODO check distinct=preserve etc, there's probably more conditions
       (when (and (not (contains? (->> (ag->preds ag)
                                       (into #{} (comp (map z/vector-zip)
                                                       (mapcat expr-quantifiers))))
                                  qid))
-                 (every? #(= % :column) (map first body-cols)))
+                 (every? #(= % :column) (map (comp first second) cols)))
         (-> ag
             ;; TODO column mapping
             (z/replace inner-box))))
@@ -94,12 +94,11 @@
               (z/replace [:qgm.box/select (second (z/node ag))
                           [:qgm.quantifier/foreach {}
                            [:qgm.box/grouping group-opts
-                            [:qgm.quantifier/foreach {:qgm.quantifier/id (gensym scalar-qid)}
+                            [:qgm.quantifier/foreach {:qgm.quantifier/id (:qgm.quantifier/id group-q-opts)}
                              [:qgm.box/outer-join {}
                               [:qgm.quantifier/preserved-foreach {:qgm.quantifier/id pf-qid}
-                               (into [:qgm.box/select {:qgm.box.head/columns (->> (vals col-mapping)
-                                                                                  (mapv last))
-                                                       :qgm.box.body/columns (mapv key col-mapping)}]
+                               (into [:qgm.box/select {:qgm.box/columns (for [[k expr] col-mapping]
+                                                                          [(last expr) k])}]
                                      other-qs)]
                               [:qgm.quantifier/foreach group-q-opts
                                inner-box]]]]]]))))
@@ -109,29 +108,25 @@
   ;; SELECT c.custkey FROM customer c
   ;; WHERE 1000000 < (SELECT SUM(o.totalprice) FROM orders o WHERE o.custkey = c.custkey)
   (def scalar-subquery
-    '{:tree [:qgm.box/select {:qgm.box.head/columns [custkey]
-                              :qgm.box.body/columns [[:column q0 custkey]]}
+    '{:tree [:qgm.box/select {:qgm.box/columns [[custkey [:column q0 custkey]]]}
              [:qgm.quantifier/foreach {:qgm.quantifier/id q0
                                        :qgm.quantifier/columns [custkey]}
               [:qgm.box/base-table {:qgm.box.base-table/name customer
-                                    :qgm.box.head/columns [custkey]}]]
+                                    :qgm.box/columns [custkey]}]]
 
              [:qgm.quantifier/scalar {:qgm.quantifier/id q1
                                       :qgm.quantifier/columns [$column_1$]}
-              [:qgm.box/select {:qgm.box.head/columns [$column_1$]
-                                :qgm.box.body/columns [[:column q2 $column_1$]]}
+              [:qgm.box/select {:qgm.box/columns [[$column_1$ [:column q2 $column_1$]]]}
                [:qgm.quantifier/foreach {:qgm.quantifier/id q2
                                          :qgm.quantifier/columns [$column_1$]}
-                [:qgm.box/grouping {:qgm.box.head/columns [$column_1$]
-                                    :qgm.box.body/columns [[:agg-call sum [:column q3 totalprice]]]}
+                [:qgm.box/grouping {:qgm.box/columns [[$column_1$ [:agg-call sum [:column q3 totalprice]]]]}
                  [:qgm.quantifier/foreach {:qgm.quantifier/id q3
                                            :qgm.quantifier/columns [totalprice]}
-                  [:qgm.box/select {:qgm.box.head/columns [totalprice]
-                                    :qgm.box.body/columns [[:column q4 totalprice]]}
+                  [:qgm.box/select {:qgm.box/columns [[totalprice [:column q4 totalprice]]]}
                    [:qgm.quantifier/foreach {:qgm.quantifier/id q4
                                              :qgm.quantifier/columns [custkey totalprice]}
                     [:qgm.box/base-table {:qgm.box.base-table/name orders
-                                          :qgm.box.head/columns [custkey totalprice]}]]]]]]]]]
+                                          :qgm.box/columns [[custkey] [totalprice]]}]]]]]]]]]
 
       :preds {p0 [:call = [:column q4 custkey] [:column q0 custkey]]
               p1 [:call < [:literal 1000000] [:column q1 $column_1$]]}})
@@ -143,37 +138,32 @@
       (qgm/qgm-unzip)))
 
 (def decorrelated-scalar-subquery
-  '{:tree [:qgm.box/select {:qgm.box.head/columns [custkey]
-                            :qgm.box.body/columns [[:column q0 custkey]]}
+  '{:tree [:qgm.box/select {:qgm.box/columns [[custkey [:column q0 custkey]]]}
            [:qgm.quantifier/foreach {:qgm.quantifier/id q0}
-            [:qgm.box/grouping {:qgm.box.head/columns [custkey $rownum $column_1$]
-                                :qgm.box.body/columns [[:column q1 custkey]
-                                                       [:column q1 $rownum]
-                                                       [:agg-call sum [:column q1 totalprice]]]
+            [:qgm.box/grouping {:qgm.box/columns [[custkey [:column q1 custkey]]
+                                                  [$rownum [:column q1 $rownum]]
+                                                  [$column_1$ [:agg-call sum [:column q1 totalprice]]]]
                                 :qgm.box.grouping/grouping-by [[:column q1 custkey]
                                                                [:column q1 $rownum]]}
              [:qgm.quantifier/foreach {:qgm.quantifier/id q1}
-              [:qgm.box/outer-join {:qgm.box.head/columns [custkey $rownum totalprice]
-                                    :qgm.box.body/columns [[:column q2 custkey]
-                                                           [:column q2 $rownum]
-                                                           [:column q4 totalprice]]}
+              [:qgm.box/outer-join {:qgm.box/columns [[custkey [:column q2 custkey]]
+                                                      [$rownum [:column q2 $rownum]]
+                                                      [totalprice [:column q4 totalprice]]]}
                [:qgm.quantifier/preserved-foreach {:qgm.quantifier/id q2}
-                [:qgm.box/select {:qgm.box.head/columns [custkey $rownum]
-                                  :qgm.box.body/columns [[:column q2 custkey]
-                                                         [:row-number]]}
+                [:qgm.box/select {:qgm.box/columns [[custkey [:column q2 custkey]]
+                                                    [$rownum [:row-number]]]}
                  [:qgm.quantifier/foreach {:qgm.quantifier/id q3
                                            :qgm.quantifier/columns [custkey]}
                   [:qgm.box/base-table {:qgm.box.base-table/name customer
-                                        :qgm.box.head/columns [custkey]}]]]]
+                                        :qgm.box/columns [[custkey]]}]]]]
 
                [:qgm.quantifier/foreach {:qgm.quantifier/id q4
                                          :qgm.quantifier/columns [custkey totalprice]}
-                [:qgm.box/select {:qgm.box.head/columns [custkey totalprice]
-                                  :qgm.box.body/columns [[:column q5 custkey]
-                                                         [:column q5 totalprice]]}
+                [:qgm.box/select {:qgm.box/columns [[custkey [:column q5 custkey]]
+                                                    [totalprice [:column q5 totalprice]]]}
                  [:qgm.quantifier/foreach {:qgm.quantifier/id q5
                                            :qgm.quantifier/columns [custkey totalprice]}
                   [:qgm.box/base-table {:qgm.box.base-table/name order
-                                        :qgm.box.head/columns [custkey totalprice]}]]]]]]]]]
+                                        :qgm.box/columns [[custkey] [totalprice]]}]]]]]]]]]
     :preds {p0 [:call = [:column q2 custkey] [:column q4 custkey]]
             p1 [:call < [:literal 1000000] [:column q0 $column_1$]]}})
