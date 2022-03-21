@@ -83,25 +83,38 @@
       (when-let [{:keys [scalar-opts group-opts group-q-opts inner-box]} (->> ag (r/one-tu ->scalar-aggregate))]
         (let [scalar-qid (:qgm.quantifier/id scalar-opts)
               other-qs (qs-except ag scalar-qid)
-              pf-qid (->sym scalar-qid "r9pf")
+              grouping-qid (:qgm.quantifier/id group-q-opts)
+              ojpf-qid (->sym scalar-qid "r9ojpf")
+              ojf-qid (->sym scalar-qid "r9ojf")
+              row-num-col (->sym scalar-qid "r9rn")
               col-mapping (->> (for [[_ {qid :qgm.quantifier/id, cols :qgm.quantifier/columns} _] other-qs
                                      col cols]
                                  (MapEntry/create [:column qid col]
-                                                  [:column pf-qid (->sym qid col)]))
+                                                  [:column ojpf-qid (->sym qid col)]))
                                (into {}))]
           ;; TODO finish me
           (-> ag
-              (z/replace [:qgm.box/select (second (z/node ag))
-                          [:qgm.quantifier/foreach {}
-                           [:qgm.box/grouping group-opts
-                            [:qgm.quantifier/foreach {:qgm.quantifier/id (:qgm.quantifier/id group-q-opts)}
-                             [:qgm.box/outer-join {}
-                              [:qgm.quantifier/preserved-foreach {:qgm.quantifier/id pf-qid}
-                               (into [:qgm.box/select {:qgm.box/columns (for [[k expr] col-mapping]
-                                                                          [(last expr) k])}]
-                                     other-qs)]
-                              [:qgm.quantifier/foreach group-q-opts
-                               inner-box]]]]]]))))
+              (z/replace
+               [:qgm.box/select (second (z/node ag))
+                [:qgm.quantifier/foreach {}
+                 [:qgm.box/grouping (let [grouping-cols (conj (vec #_(for )[])
+                                                              [[row-num-col [[:column grouping-qid row-num-col]]]])
+                                          ]
+                                      {:qgm.box/columns (into grouping-cols
+                                                              (:qgm.box/columns group-opts))
+                                       :qgm.box.grouping/grouping-by (mapv second grouping-cols)})
+                  [:qgm.quantifier/foreach {:qgm.quantifier/id grouping-qid}
+                   [:qgm.box/outer-join {:qgm.box/columns (conj (vec (for [[k expr] col-mapping]
+                                                                       [(last k) expr]))
+                                                                [row-num-col [:row-number]])}
+                    [:qgm.quantifier/preserved-foreach {:qgm.quantifier/id ojpf-qid
+                                                        :qgm.quantifier/columns (mapv last (vals col-mapping))}
+                     (into [:qgm.box/select {:qgm.box/columns (for [[k expr] col-mapping]
+                                                                [(last expr) k])}]
+                           other-qs)]
+                    [:qgm.quantifier/foreach {:qgm.quantifier/id ojf-qid
+                                              :qgm.quantifier/columns (:qgm.quantifier/columns group-q-opts)}
+                     inner-box]]]]]]))))
 
       nil))
 
