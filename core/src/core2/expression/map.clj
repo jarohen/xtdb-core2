@@ -4,15 +4,14 @@
             [core2.types :as types]
             [core2.util :as util]
             [core2.vector.indirect :as iv]
-            [core2.vector.writer :as vw])
-  (:import (core2.vector IIndirectVector IIndirectRelation IRowCopier IVectorWriter)
+            [core2.vector :as vec])
+  (:import (core2.vector IIndirectVector IVectorWriter2)
            io.netty.util.collection.IntObjectHashMap
            (java.lang AutoCloseable)
            (java.util HashMap List)
-           (java.util.function Function)
            (org.apache.arrow.memory BufferAllocator)
            (org.apache.arrow.memory.util.hash MurmurHasher)
-           org.apache.arrow.vector.NullVector
+           (org.apache.arrow.vector NullVector)
            (org.roaringbitmap IntConsumer RoaringBitmap)))
 
 (def ^:private ^org.apache.arrow.memory.util.hash.ArrowBufHasher hasher
@@ -51,6 +50,11 @@
 
 #_{:clj-kondo/ignore [:unused-binding]}
 (definterface IRelationMap
+  (^java.util.Map buildColumnTypes [])
+  (^java.util.List buildKeyColumnNames [])
+  (^java.util.Map probeColumnTypes [])
+  (^java.util.List probeKeyColumnNames [])
+
   (^core2.expression.map.IRelationMapBuilder buildFromRelation [^core2.vector.IIndirectRelation inRelation])
   (^core2.expression.map.IRelationMapProber probeFromRelation [^core2.vector.IIndirectRelation inRelation])
   (^core2.vector.IIndirectRelation getBuiltRelation []))
@@ -141,20 +145,30 @@
 
 (defn ->relation-map ^core2.expression.map.IRelationMap
   [^BufferAllocator allocator,
-   {:keys [key-col-names build-key-col-names probe-key-col-names store-col-names with-nil-row?
-           nil-keys-equal?]
+   {:keys [key-col-names store-full-build-rel?
+           build-col-types build-key-col-names
+           probe-col-types probe-key-col-names
+           with-nil-row? nil-keys-equal?]
     :or {build-key-col-names key-col-names
          probe-key-col-names key-col-names}}]
 
   (let [hash->bitmap (IntObjectHashMap.)
-        out-rel (vw/->rel-writer allocator)]
-    (doseq [col-name (set/union (set build-key-col-names) (set store-col-names))]
-      (.writerForName out-rel (name col-name)))
+        rel-writer (vec/rel-writer allocator
+                                   (cond-> build-col-types
+                                     (not store-full-build-rel?) (select-keys build-key-col-names)
+
+                                     with-nil-row? (->> (into {} (map (juxt key
+                                                                            (comp (fn [col-type]
+                                                                                    (cond-> col-type
+                                                                                      with-nil-row? (types/merge-col-types :null)))
+                                                                                  val)))))))
+
+        build-key-cols (mapv #(iv/->direct-vec (.getVector (.writerFor rel-writer %)))
+                             build-key-col-names)]
 
     (when with-nil-row?
-      (assert store-col-names "supply `:store-col-names` with `:with-nil-row? true`")
-
-      (vw/append-rel out-rel (->nil-rel store-col-names)))
+      (doto (.rowCopier rel-writer (->nil-rel (keys build-col-types)))
+        (.copyRow 0)))
 
     (letfn [(compute-hash-bitmap [^long row-hash]
               (or (.get hash->bitmap row-hash)
@@ -163,26 +177,25 @@
                     bitmap)))]
       (reify
         IRelationMap
+        (buildColumnTypes [_] build-col-types)
+        (buildKeyColumnNames [_] build-key-col-names)
+        (probeColumnTypes [_] probe-col-types)
+        (probeKeyColumnNames [_] probe-key-col-names)
+
         (buildFromRelation [_ in-rel]
-          (let [in-rel (if store-col-names
-                         (->> (set/union (set build-key-col-names) (set store-col-names))
+          (let [in-rel (if store-full-build-rel?
+                         in-rel
+                         (->> (set build-key-col-names)
                               (mapv #(.vectorForName in-rel (name %)))
-                              iv/->indirect-rel)
-                         in-rel)
+                              iv/->indirect-rel))
                 in-key-cols (mapv #(.vectorForName in-rel (name %)) build-key-col-names)
-                out-writers (->> (mapv #(.writerForName out-rel (.getName ^IIndirectVector %)) in-rel))
-                out-copiers (mapv vw/->row-copier out-writers in-rel)
-                build-rel (vw/rel-writer->reader out-rel)
-                comparator (->comparator in-key-cols (mapv #(.vectorForName build-rel (name %)) build-key-col-names) nil-keys-equal?)
+                row-copier (.rowCopier rel-writer in-rel)
+                comparator (->comparator in-key-cols build-key-cols nil-keys-equal?)
                 hasher (->hasher in-key-cols)]
 
             (letfn [(add ^long [^RoaringBitmap hash-bitmap, ^long idx]
-                      (let [out-idx (.getValueCount (.getVector ^IVectorWriter (first out-writers)))]
+                      (let [out-idx (.copyRow row-copier idx)]
                         (.add hash-bitmap out-idx)
-
-                        (doseq [^IRowCopier copier out-copiers]
-                          (.copyRow copier idx))
-
                         (returned-idx out-idx)))]
 
               (reify IRelationMapBuilder
@@ -198,8 +211,7 @@
 
         (probeFromRelation [_ probe-rel]
           (let [in-key-cols (mapv #(.vectorForName probe-rel (name %)) probe-key-col-names)
-                build-rel (vw/rel-writer->reader out-rel)
-                comparator (->comparator in-key-cols (mapv #(.vectorForName build-rel (name %)) build-key-col-names) nil-keys-equal?)
+                comparator (->comparator in-key-cols build-key-cols nil-keys-equal?)
                 hasher (->hasher in-key-cols)]
 
             (reify IRelationMapProber
@@ -218,8 +230,7 @@
                     res))))))
 
         (getBuiltRelation [_]
-          (vw/rel-writer->reader out-rel))
+          (iv/->indirect-rel (mapv #(iv/->direct-vec (.getVector ^IVectorWriter2 %)) rel-writer)))
 
         AutoCloseable
-        (close [_]
-          (util/try-close out-rel))))))
+        (close [_] (.close rel-writer))))))

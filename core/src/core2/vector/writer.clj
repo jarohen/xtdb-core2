@@ -391,21 +391,22 @@
   (vec->writer (-> (types/->field col-name types/dense-union-type false)
                    (.createVector allocator))))
 
-(defn ->rel-writer ^core2.vector.IRelationWriter [^BufferAllocator allocator]
-  (let [writers (LinkedHashMap.)]
-    (reify IRelationWriter
-      (writerForName [_ col-name]
-        (.computeIfAbsent writers col-name
-                          (reify Function
-                            (apply [_ col-name]
-                              (->vec-writer allocator col-name)))))
+(defn ->rel-writer
+  (^core2.vector.IRelationWriter [^BufferAllocator allocator]
+   (let [writers (LinkedHashMap.)]
+     (reify IRelationWriter
+       (writerForName [_ col-name]
+         (.computeIfAbsent writers col-name
+                           (reify Function
+                             (apply [_ col-name]
+                               (->vec-writer allocator col-name)))))
 
-      (iterator [_]
-        (.iterator (.values writers)))
+       (iterator [_]
+         (.iterator (.values writers)))
 
-      AutoCloseable
-      (close [_]
-        (AutoCloseables/close (.values writers))))))
+       AutoCloseable
+       (close [_]
+         (AutoCloseables/close (.values writers)))))))
 
 (defn rel-writer->reader ^core2.vector.IIndirectRelation [^IRelationWriter rel-writer]
   (iv/->indirect-rel (for [^IVectorWriter vec-writer rel-writer]

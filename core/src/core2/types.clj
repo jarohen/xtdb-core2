@@ -3,7 +3,7 @@
             [core2.rewrite :refer [zmatch]]
             [core2.util :as util])
   (:import (clojure.lang Keyword MapEntry)
-           (core2.vector IDenseUnionWriter IVectorWriter)
+           (core2.vector IDenseUnionWriter IPolyVectorWriter IVectorWriter)
            (core2.vector.extensions KeywordType KeywordVector UriType UriVector UuidType UuidVector)
            java.net.URI
            (java.nio ByteBuffer CharBuffer)

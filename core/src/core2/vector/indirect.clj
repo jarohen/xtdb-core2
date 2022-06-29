@@ -3,7 +3,7 @@
             [core2.types :as ty]
             [core2.util :as util])
   (:import core2.DenseUnionUtil
-           [core2.vector IIndirectRelation IIndirectVector IListElementCopier IListReader IRowCopier IStructReader]
+           [core2.vector IIndirectRelation IIndirectVector IListElementCopier IListReader IRowCopier IRowCopier2 IStructReader]
            [java.util LinkedHashMap Map]
            org.apache.arrow.memory.BufferAllocator
            [org.apache.arrow.vector FieldVector ValueVector VectorSchemaRoot]
@@ -156,6 +156,9 @@
   (structReader [_] (->StructReader v))
   (listReader [_] (->list-reader v))
 
+  (rowCopier2 [_ w]
+    (.rowCopier w v))
+
   (monoReader [_] (vec/->mono-reader v))
   (polyReader [_ ordered-col-types] (vec/->poly-reader v ordered-col-types)))
 
@@ -213,6 +216,12 @@
   (rowCopier [this-vec w]
     (let [copier (.rowCopier w v)]
       (reify IRowCopier
+        (copyRow [_ idx]
+          (.copyRow copier (.getIndex this-vec idx))))))
+
+  (rowCopier2 [this-vec w]
+    (let [copier (.rowCopier w v)]
+      (reify IRowCopier2
         (copyRow [_ idx]
           (.copyRow copier (.getIndex this-vec idx))))))
 

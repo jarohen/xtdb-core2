@@ -1,5 +1,6 @@
 package core2.vector;
 
-public interface IPolyVectorWriter extends IPolyValueWriter {
-    IWriterPosition writerPosition();
+@SuppressWarnings("try")
+public interface IPolyVectorWriter extends IPolyValueWriter, IVectorWriter2 {
+
 }

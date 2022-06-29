@@ -1,7 +1,8 @@
 (ns core2.vector
-  (:require [core2.types :as types])
-  (:import (core2.vector IMonoVectorWriter IMonoVectorReader IPolyVectorWriter IPolyVectorReader IWriterPosition)
-           java.util.List
+  (:require [core2.types :as types]
+            [core2.util :as util])
+  (:import (core2.vector IIndirectVector IMonoVectorReader IMonoVectorWriter IPolyVectorReader IPolyVectorWriter IRelationWriter2 IRowCopier2 IVectorWriter2 IWriterPosition)
+           (java.util List Map)
            (org.apache.arrow.vector BaseFixedWidthVector BaseVariableWidthVector BitVectorHelper DateMilliVector ExtensionTypeVector FixedSizeBinaryVector IntervalDayVector IntervalMonthDayNanoVector IntervalYearVector NullVector PeriodDuration TimeMicroVector TimeMilliVector TimeNanoVector TimeSecVector ValueVector)
            (org.apache.arrow.vector.complex DenseUnionVector)))
 
@@ -20,6 +21,11 @@
 (defprotocol PolyFactory
   (->poly-reader ^core2.vector.IPolyVectorReader [arrow-vec, ^List ordered-col-types])
   (->poly-writer ^core2.vector.IPolyVectorWriter [arrow-vec, ^List ordered-col-types]))
+
+(defprotocol CopierFactory
+  (->row-copier ^core2.vector.IRowCopier2 [^ValueVector dest-vec
+                                           ^ValueVector src-vec
+                                           ^IWriterPosition writer-position]))
 
 (deftype WriterPosition [^:unsynchronized-mutable ^int pos]
   IWriterPosition
@@ -41,8 +47,8 @@
   (->mono-reader [_]
     (reify IMonoVectorReader))
 
-  (->mono-writer [_]
-    (let [wp (WriterPosition. 0)]
+  (->mono-writer [arrow-vec]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
         (writeNull [_ _] (.getPositionAndIncrement wp)))))
@@ -64,7 +70,7 @@
 
   (->mono-writer [arrow-vec]
     (let [byte-width (.getByteWidth arrow-vec)
-          wp (WriterPosition. 0)]
+          wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
         (writeNull [_ _] (.setNull arrow-vec (.getPositionAndIncrement wp)))
@@ -93,7 +99,7 @@
       (readDouble [_ idx] (.getDouble (.getDataBuffer arrow-vec) (* idx Double/BYTES)))))
 
   (->mono-writer [arrow-vec]
-    (let [wp (WriterPosition. 0)]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify
         IMonoVectorWriter
         (writerPosition [_] wp)
@@ -122,7 +128,7 @@
         (.nioBuffer (.getDataBuffer arrow-vec) (.getStartOffset arrow-vec idx) (.getValueLength arrow-vec idx)))))
 
   (->mono-writer [arrow-vec]
-    (let [wp (WriterPosition. 0)]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
 
@@ -146,7 +152,7 @@
       (readInt [_ idx] (-> (.get arrow-vec idx) (quot 86400000) (int)))))
 
   (->mono-writer [arrow-vec]
-    (let [wp (WriterPosition. 0)]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
         (writeNull [_ _] (.setNull arrow-vec (.getPositionAndIncrement wp)))
@@ -158,7 +164,7 @@
     (reify IMonoVectorReader
       (readLong [_ idx] (.get arrow-vec idx))))
   (->mono-writer [arrow-vec]
-    (let [wp (WriterPosition. 0)]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
         (writeNull [_ _] (.setNull arrow-vec (.getPositionAndIncrement wp)))
@@ -169,7 +175,7 @@
     (reify IMonoVectorReader
       (readLong [_ idx] (.get arrow-vec idx))))
   (->mono-writer [arrow-vec]
-    (let [wp (WriterPosition. 0)]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
         (writeNull [_ _] (.setNull arrow-vec (.getPositionAndIncrement wp)))
@@ -180,7 +186,7 @@
     (reify IMonoVectorReader
       (readLong [_ idx] (.get arrow-vec idx))))
   (->mono-writer [arrow-vec]
-    (let [wp (WriterPosition. 0)]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
         (writeNull [_ _] (.setNull arrow-vec (.getPositionAndIncrement wp)))
@@ -191,7 +197,7 @@
     (reify IMonoVectorReader
       (readLong [_ idx] (.get arrow-vec idx))))
   (->mono-writer [arrow-vec]
-    (let [wp (WriterPosition. 0)]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
         (writeNull [_ _] (.setNull arrow-vec (.getPositionAndIncrement wp)))
@@ -205,7 +211,7 @@
     (reify IMonoVectorReader
       (readObject [_ idx] (.getObject arrow-vec idx))))
   (->mono-writer [arrow-vec]
-    (let [wp (WriterPosition. 0)]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
         (writeNull [_ _] (.setNull arrow-vec (.getPositionAndIncrement wp)))
@@ -219,7 +225,7 @@
     (reify IMonoVectorReader
       (readObject [_ idx] (.getObject arrow-vec idx))))
   (->mono-writer [arrow-vec]
-    (let [wp (WriterPosition. 0)]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
         (writeNull [_ _] (.setNull arrow-vec (.getPositionAndIncrement wp)))
@@ -239,7 +245,7 @@
       (readObject [_ idx] (.getObject arrow-vec idx))))
 
   (->mono-writer [arrow-vec]
-    (let [wp (WriterPosition. 0)]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IMonoVectorWriter
         (writerPosition [_] wp)
         (writeNull [_ _] (.setNull arrow-vec (.getPositionAndIncrement wp)))
@@ -349,8 +355,8 @@
         (read [_ _idx] null-type-id)
         (getTypeId [_] null-type-id))))
 
-  (->poly-writer [_vec _ordered-col-types]
-    (let [wp (WriterPosition. 0)]
+  (->poly-writer [arrow-vec _ordered-col-types]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))]
       (reify IPolyVectorWriter
         (writeNull [_ _type-id _] (.getPositionAndIncrement wp))
         (writerPosition [_] wp)))))
@@ -379,29 +385,29 @@
 
 (extend-protocol PolyFactory
   DenseUnionVector
-  (->poly-reader [duv ordered-col-types]
+  (->poly-reader [arrow-vec ordered-col-types]
     (if (= 1 (count ordered-col-types))
-      (->MonoToPolyReader (->mono-reader duv) 0 0)
+      (->MonoToPolyReader (->mono-reader arrow-vec) 0 0)
 
-      (->DuvReader duv
-                   (duv-reader-type-id-mapping duv ordered-col-types)
-                   (object-array (mapv ->mono-reader duv))
+      (->DuvReader arrow-vec
+                   (duv-reader-type-id-mapping arrow-vec ordered-col-types)
+                   (object-array (mapv ->mono-reader arrow-vec))
                    0 nil 0)))
 
-  (->poly-writer [duv ordered-col-types]
-    (let [wp (WriterPosition. 0)
+  (->poly-writer [arrow-vec ordered-col-types]
+    (let [wp (WriterPosition. (.getValueCount arrow-vec))
           type-count (count ordered-col-types)
-          type-id-mapping (duv-writer-type-id-mapping duv ordered-col-types)
+          type-id-mapping (duv-writer-type-id-mapping arrow-vec ordered-col-types)
           writers (object-array type-count)]
 
       (dotimes [type-id type-count]
-        (aset writers type-id (->mono-writer (.getVectorByType duv (aget type-id-mapping type-id)))))
+        (aset writers type-id (->mono-writer (.getVectorByType arrow-vec (aget type-id-mapping type-id)))))
 
       (letfn [(duv-child-writer [type-id]
                 (let [duv-idx (.getPositionAndIncrement wp)
                       ^IMonoVectorWriter w (aget writers type-id)]
-                  (.setTypeId duv duv-idx (aget type-id-mapping type-id))
-                  (.setOffset duv duv-idx (.getPosition (.writerPosition w)))
+                  (.setTypeId arrow-vec duv-idx (aget type-id-mapping type-id))
+                  (.setOffset arrow-vec duv-idx (.getPosition (.writerPosition w)))
                   w))]
         (reify IPolyVectorWriter
           (writerPosition [_] wp)
@@ -461,3 +467,78 @@
   (readDouble [_] (.readDouble inner))
   (readBuffer [_] (.readBuffer inner))
   (readObject [_] (.readObject inner)))
+
+(defn- wrap-copy-vecs [f ^ValueVector dest-vec src-vec ^IWriterPosition wp]
+  (cond
+    (instance? DenseUnionVector src-vec)
+    (let [^DenseUnionVector src-vec src-vec
+          ^IRowCopier2 inner-copier (f (first (seq src-vec)))]
+      (reify IRowCopier2
+        (copyRow [_ src-idx]
+          (.copyRow inner-copier (.getOffset src-vec src-idx)))))
+
+    (instance? NullVector src-vec)
+    (reify IRowCopier2
+      (copyRow [_ _src-idx]
+        (let [pos (.getPositionAndIncrement wp)]
+          (.setValueCount dest-vec (inc pos))
+          pos)))
+
+    :else
+    (f src-vec)))
+
+(extend-protocol CopierFactory
+  ValueVector
+  (->row-copier [dest-vec src-vec ^WriterPosition wp]
+    (-> (fn [src-vec]
+          (reify IRowCopier2
+            (copyRow [_ src-idx]
+              (let [pos (.getPositionAndIncrement wp)]
+                (.copyFromSafe dest-vec src-idx pos src-vec)
+                (.setValueCount dest-vec (inc pos))
+                pos))))
+        (wrap-copy-vecs dest-vec src-vec wp)))
+
+  NullVector
+  (->row-copier [dest-vec _src-vec ^WriterPosition wp]
+    (reify IRowCopier2
+      (copyRow [_ _src-idx]
+        (let [pos (.getPositionAndIncrement wp)]
+          (.setValueCount dest-vec (inc pos))
+          pos)))))
+
+(defn vec-writer ^core2.vector.IVectorWriter2 [allocator col-name col-type]
+  (let [wp (WriterPosition. 0)
+        dest-vec (-> (types/col-type->field col-name col-type)
+                     (.createVector allocator))]
+    (reify IVectorWriter2
+      (getVector [_] dest-vec)
+      (writerPosition [_] wp)
+      (rowCopier [_ src-vec] (->row-copier dest-vec src-vec wp))
+      (close [_] (.close dest-vec)))))
+
+(defn rel-writer ^core2.vector.IRelationWriter2 [allocator col-types]
+  (let [wp (WriterPosition. 0)
+        ^Map writers (->> col-types
+                          (into {} (map (juxt key
+                                              (fn [[col-name col-type]]
+                                                (vec-writer allocator col-name col-type))))))]
+    (reify IRelationWriter2
+      (iterator [_] (.iterator (.values writers)))
+
+      (writerPosition [_] wp)
+      (writerFor [_ col-name] (get writers col-name))
+
+      (rowCopier [_ in-rel]
+        (let [copiers (->> in-rel
+                           (mapv (fn [^IIndirectVector in-col]
+                                   (.rowCopier2 in-col (get writers (symbol (.getName in-col)))))))]
+          (reify IRowCopier2
+            (copyRow [_ idx]
+              (let [pos (.getPositionAndIncrement wp)]
+                (doseq [^IRowCopier2 copier copiers]
+                  (.copyRow copier idx))
+                pos)))))
+
+      (close [this]
+        (run! util/try-close (seq this))))))

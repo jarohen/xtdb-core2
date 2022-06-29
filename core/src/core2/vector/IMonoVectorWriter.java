@@ -2,9 +2,8 @@ package core2.vector;
 
 import java.nio.ByteBuffer;
 
-public interface IMonoVectorWriter {
-
-    IWriterPosition writerPosition();
+@SuppressWarnings("try")
+public interface IMonoVectorWriter extends IVectorWriter2 {
 
     void writeNull(Void nullValue);
 
