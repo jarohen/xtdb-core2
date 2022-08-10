@@ -168,33 +168,14 @@
           (vec (for [row (tu/query-ra plan {'$ db})]
                  (mapv #(-> (get column->anonymous-col %) name keyword row) projection))))))))
 
-(defn insert->docs [{:keys [tables] :as node} insert-statement]
-  (let [[_ _ _ insertion-target insert-columns-and-source] insert-statement
-        table (first (filter string? (flatten insertion-target)))
-        from-subquery insert-columns-and-source
-        from-subquery-results (execute-query-expression node (last from-subquery))
-        columns (if (= 1 (count (rest from-subquery)))
-                  (get tables table)
-                  (let [insert-column-list (second from-subquery)]
-                    (->> (flatten insert-column-list)
-                         (filter string?))))]
-    (for [row from-subquery-results]
-      (into {:_table table} (zipmap (map keyword columns) row)))))
-
-(defn- insert-statement [node insert-statement]
-  (-> (c2/submit-tx node (vec (for [doc (insert->docs node insert-statement)]
-                                [:put (merge {:id (UUID/randomUUID)} doc)])))
-      (tu/then-await-tx node))
-  node)
-
 (defn skip-statement? [^String x]
   (boolean (re-find #"(?is)^\s*CREATE\s+(UNIQUE\s+)?INDEX\s+(\w+)\s+ON\s+(\w+)\s*\((.+)\)\s*$" x)))
 
-(defn- execute-statement [node direct-sql-data-statement]
+(defn- execute-statement [node sql-statement]
   (binding [r/*memo* (HashMap.)]
-    (case (first direct-sql-data-statement)
-      :insert_statement (insert-statement node direct-sql-data-statement))))
-
+    (-> (c2/submit-tx node [[:sql sql-statement [[]]]])
+        (tu/then-await-tx node))
+    node))
 
 (defn parse-create-table [^String x]
   (when-let [[_ table-name columns] (re-find #"(?is)^\s*CREATE\s+TABLE\s+(\w+)\s*\((.+)\)\s*$" x)]
@@ -231,8 +212,7 @@
                               (parse-create-view statement))]
             (execute-record this record)
             (throw (IllegalArgumentException. (p/failure->str tree))))
-          (let [direct-sql-data-statement-tree (second tree)]
-            (execute-statement this direct-sql-data-statement-tree))))))
+          (execute-statement this statement)))))
 
   (execute-query [this query]
     (let [edited-query (preprocess-query query)
