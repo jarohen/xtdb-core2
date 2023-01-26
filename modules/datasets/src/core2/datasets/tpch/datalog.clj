@@ -1,9 +1,9 @@
-(ns core2.datasets.tpch.datalog
-  (:import [java.util Date]))
+(ns core2.datasets.tpch.datalog)
 
 (defn- with-in-args [q in-args]
   (-> q (vary-meta assoc ::in-args in-args)))
 
+;; TODO nested agg exprs
 (def q1
   '{:find [l_returnflag
            l_linestatus
@@ -30,6 +30,7 @@
             [(<= l_shipdate #inst "1998-09-02")]]
     :order-by [[l_returnflag :asc] [l_linestatus :asc]]})
 
+;; TODO nested sub-query
 (def q2
   '{:find [s_acctbal
            s_name
@@ -39,30 +40,46 @@
            s_address
            s_phone
            s_comment]
-    :where [[p :p_mfgr p_mfgr]
+    :where [[p :_table :part]
+            [p :p_mfgr p_mfgr]
             [p :p_size 15]
             [p :p_type p_type]
-            [(re-find #"^.*BRASS$" p_type)]
+            [(like "%BRASS" p_type)]
+
+            [ps :_table :partsupp]
             [ps :ps_partkey p]
             [ps :ps_supplycost ps_supplycost]
-            [(q {:find [(min ps_supplycost)]
-                 :in [$ p]
-                 :where [[ps :ps_partkey p]
-                         [ps :ps_supplycost ps_supplycost]
-                         [ps :ps_suppkey s]
-                         [s :s_nationkey n]
-                         [n :n_regionkey r]
-                         [r :r_name "EUROPE"]]} p) [[ps_supplycost]]]
             [ps :ps_suppkey s]
+
+            (q {:find [(min ps_supplycost)]
+                :keys [ps_supplycost]
+                :in [p]
+                :where [[ps :_table partsupp]
+                        [ps :ps_partkey p]
+                        [ps :ps_supplycost ps_supplycost]
+                        [ps :ps_suppkey s]
+                        [s :_table :supplier]
+                        [s :s_nationkey n]
+                        [n :_table :nation]
+                        [n :n_regionkey r]
+                        [r :_table :region]
+                        [r :r_name "EUROPE"]]})
+
+            [s :_table :supplier]
             [s :s_acctbal s_acctbal]
             [s :s_address s_address]
             [s :s_name s_name]
             [s :s_phone s_phone]
             [s :s_comment s_comment]
-            [n :n_name n_name]
             [s :s_nationkey n]
+
+            [n :_table :nation]
+            [n :n_name n_name]
             [n :n_regionkey r]
+
+            [r :_table :region]
             [r :r_name "EUROPE"]]
+
     :order-by [[s_acctbal :desc]
                [n_name :asc]
                [s_name :asc]
@@ -110,24 +127,38 @@
                      [l :l_commitdate l_commitdate]
                      [l :l_receiptdate l_receiptdate]
                      [(< l_commitdate l_receiptdate)])]
+
     :order-by [[o_orderpriority :asc]]})
 
+;; TODO join order
+;; TODO nested agg exprs
 (def q5
   (-> '{:find [n_name (sum (* l_extendedprice (- 1 l_discount)))]
         :in [?region]
-        :where [[o :o_custkey c]
-                [l :l_orderkey o]
-                [l :l_suppkey s]
-                [s :s_nationkey n]
-                [c :c_nationkey n]
-                [n :n_name n_name]
-                [n :n_regionkey r]
-                [r :r_name ?region]
-                [l :l_extendedprice l_extendedprice]
-                [l :l_discount l_discount]
+        :where [[o :_table :orders]
+                [o :o_custkey c]
                 [o :o_orderdate o_orderdate]
                 [(>= o_orderdate #inst "1994-01-01")]
-                [(< o_orderdate #inst "1995-01-01")]]
+                [(< o_orderdate #inst "1995-01-01")]
+
+                [l :_table :lineitem]
+                [l :l_orderkey o]
+                [l :l_suppkey s]
+                [l :l_extendedprice l_extendedprice]
+                [l :l_discount l_discount]
+
+                [s :_table :supplier]
+                [s :s_nationkey n]
+
+                [c :_table :customer]
+                [c :c_nationkey n]
+
+                [n :_table :nation]
+                [n :n_name n_name]
+                [n :n_regionkey r]
+
+                [r :_table :region]
+                [r :r_name ?region]]
         :order-by [[(sum (* l_extendedprice (- 1 l_discount))) :desc]]}
       (with-in-args ["ASIA"])))
 
@@ -147,82 +178,122 @@
             [(<= l_discount 0.07)]
             [(< l_quantity 24.0)]]})
 
-(defn inst->year [^Date d]
-  (+ 1900 (.getYear d)))
-
+;; TODO join order (I'd guess)
+;; TODO nested agg exprs
 (def q7
   '{:find [supp_nation
            cust_nation
            l_year
            (sum (* l_extendedprice (- 1 l_discount)))]
-    :where [[o :o_custkey c]
+    :where [[o :_table :orders]
+            [o :o_custkey c]
+
+            [l :_table :lineitem]
             [l :l_orderkey o]
             [l :l_suppkey s]
-            [s :s_nationkey n1]
-            [n1 :n_name supp_nation]
-            [c :c_nationkey n2]
-            [n2 :n_name cust_nation]
-            (or (and [(= "FRANCE" supp_nation)]
-                     [(= "GERMANY" cust_nation)])
-                (and [(= "GERMANY" supp_nation)]
-                     [(= "FRANCE" cust_nation)]))
             [l :l_shipdate l_shipdate]
             [l :l_discount l_discount]
             [l :l_extendedprice l_extendedprice]
             [(>= l_shipdate #inst "1995-01-01")]
             [(<= l_shipdate #inst "1996-12-31")]
-            ;; TODO can't call Clojure fns
-            [(inst->year l_shipdate) l_year]]
+            [(extract "YEAR" l_shipdate) l_year]
+
+            [s :_table supplier]
+            [s :s_nationkey n1]
+
+            [n1 :_table :nation]
+            [n1 :n_name supp_nation]
+
+            [c :_table :customer]
+            [c :c_nationkey n2]
+
+            [n2 :_table :nation]
+            [n2 :n_name cust_nation]
+
+            [(or (and (= "FRANCE" supp_nation)
+                      (= "GERMANY" cust_nation))
+                 (and (= "GERMANY" supp_nation)
+                      (= "FRANCE" cust_nation)))]]
     :order-by [[supp_nation :asc] [cust_nation :asc] [l_year :asc]]})
 
+;; TODO nested agg exprs
+;; TODO sub queries
 (def q8
   '{:find [o_year mkt_share]
-    :where [[(q {:find [o_year
-                        (sum (if (= "BRAZIL" nation) volume 0))
-                        (sum volume)]
-                 :where [[(q {:find [o_year (sum (* l_extendedprice (- 1 l_discount))) nation]
-                              :where [[o :o_custkey c]
-                                      [l :l_orderkey o]
-                                      [l :l_suppkey s]
-                                      [l :l_partkey p]
-                                      [c :c_nationkey n1]
-                                      [n1 :n_regionkey r1]
-                                      [r1 :r_name "AMERICA"]
-                                      [s :s_nationkey n2]
-                                      [n2 :n_name nation]
-                                      [l :l_discount l_discount]
-                                      [l :l_extendedprice l_extendedprice]
-                                      [o :o_orderdate o_orderdate]
-                                      [(>= o_orderdate #inst "1995-01-01")]
-                                      [(<= o_orderdate #inst "1996-12-31")]
-                                      [p :p_type "ECONOMY ANODIZED STEEL"]
-                                      [(xtdb.fixtures.tpch/inst->year o_orderdate) o_year]]})
-                          [[o_year volume nation]]]]})
-             [[o_year brazil_volume volume]]]
+    :where [(q {:find [o_year
+                       (sum (if (= "BRAZIL" nation) volume 0))
+                       (sum volume)]
+                :keys [o_year brazil_volume volume]
+                :where [(q {:find [o_year (sum (* l_extendedprice (- 1 l_discount))) nation]
+                            :keys [o_year volume nation]
+                            :where [[o :_table :orders]
+                                    [c :_table :customer]
+                                    [l :_table :lineitem]
+                                    [s :_table :supplier]
+                                    [n1 :_table :nation]
+                                    [r1 :_table :region]
+                                    [n2 :_table :nation]
+                                    [p :_table :part]
+
+                                    [o :o_custkey c]
+                                    [o :o_orderdate o_orderdate]
+                                    [(>= o_orderdate #inst "1995-01-01")]
+                                    [(<= o_orderdate #inst "1996-12-31")]
+
+                                    [l :l_orderkey o]
+                                    [l :l_suppkey s]
+                                    [l :l_partkey p]
+                                    [l :l_discount l_discount]
+                                    [l :l_extendedprice l_extendedprice]
+
+                                    [c :c_nationkey n1]
+                                    [n1 :n_regionkey r1]
+                                    [r1 :r_name "AMERICA"]
+                                    [s :s_nationkey n2]
+                                    [n2 :n_name nation]
+                                    [p :p_type "ECONOMY ANODIZED STEEL"]
+                                    [(extract "YEAR" o_orderdate) o_year]]})]})
             [(/ brazil_volume volume) mkt_share]]
     :order-by [[o_year :asc]]})
 
+;; TODO nested agg exprs
+;; TODO join order (probably)
 (def q9
   '{:find [nation o_year
            (sum (- (* l_extendedprice (- 1 l_discount))
                    (* ps_supplycost l_quantity)))]
-    :where [[l :l_orderkey o]
+    :where [[l :_table :lineitem]
+            [ps :_table :partsupp]
+            [s :_table :supplier]
+            [n :_table :nation]
+            [p :_table :part]
+            [o :_table :orders]
+
+            [l :l_orderkey o]
             [l :l_suppkey s]
             [l :l_partkey p]
-            [ps :ps_partkey p]
-            [ps :ps_suppkey s]
-            [ps :ps_supplycost ps_supplycost]
-            [s :s_nationkey n]
-            [n :n_name nation]
-            [p :p_name p_name]
-            [(re-find #".*green.*" p_name)]
             [l :l_quantity l_quantity]
             [l :l_discount l_discount]
             [l :l_extendedprice l_extendedprice]
+
+            [ps :ps_partkey p]
+            [ps :ps_suppkey s]
+            [ps :ps_supplycost ps_supplycost]
+
+            [s :s_nationkey n]
+
+            [n :n_name nation]
+
+            [p :p_name p_name]
+            [(like p_name "%green%")]
+
             [o :o_orderdate o_orderdate]
-            [(xtdb.fixtures.tpch/inst->year o_orderdate) o_year]]
+            [(extract "YEAR" o_orderdate) o_year]]
+
     :order-by [[nation :asc] [o_year :desc]]})
 
+;; TODO join order planning
+;; TODO agg exprs
 (def q10
   '{:find [c
            c_name
@@ -232,17 +303,21 @@
            c_address
            c_phone
            c_comment]
-    :where [[o :o_custkey c]
+    :where [[l :_table :lineitem]
+            [n :_table :nation]
+            [o :_table :orders]
+            [o :o_custkey c]
+
             [l :l_orderkey o]
+            [l :l_extendedprice l_extendedprice]
+            [l :l_discount l_discount]
             [c :c_nationkey n]
-            [n :n_name n_name]
             [c :c_name c_name]
             [c :c_acctbal c_acctbal]
             [c :c_address c_address]
             [c :c_phone c_phone]
             [c :c_comment c_comment]
-            [l :l_extendedprice l_extendedprice]
-            [l :l_discount l_discount]
+            [n :n_name n_name]
             [o :o_orderdate o_orderdate]
             [(>= o_orderdate #inst "1993-10-01")]
             [(< o_orderdate #inst "1994-01-01")]
@@ -250,28 +325,32 @@
     :order-by [[(sum (* l_extendedprice (- 1 l_discount))) :desc]]
     :limit 20})
 
+;; TODO agg exprs
+;; TODO sub-queries
 (def q11
   '{:find [ps_partkey value]
-    :where [[(q {:find [(sum (* ps_supplycost ps_availqty))]
-                 :where [[ps :ps_availqty ps_availqty]
-                         [ps :ps_supplycost ps_supplycost]
-                         [ps :ps_suppkey s]
-                         [s :s_nationkey n]
-                         [n :n_name "GERMANY"]]}) [[total-value]]]
-            [(q {:find [ps_partkey
-                        (sum (* ps_supplycost ps_availqty))]
-                 :where [[ps :ps_availqty ps_availqty]
-                         [ps :ps_supplycost ps_supplycost]
-                         [ps :ps_partkey ps_partkey]
-                         [ps :ps_suppkey s]
-                         [s :s_nationkey n]
-                         [n :n_name "GERMANY"]]}) [[ps_partkey value]]]
-            [(* 0.0001 total-value) ret_2]
-            [(> value ret_2)]]
+    :where [(q {:find [(sum (* ps_supplycost ps_availqty))]
+                :keys [total-value]
+                :where [[ps :_table partsupp]
+                        [ps :ps_availqty ps_availqty]
+                        [ps :ps_supplycost ps_supplycost]
+                        [ps :ps_suppkey s]
+                        [s :s_nationkey n]
+                        [n :n_name "GERMANY"]]})
+            (q {:find [ps_partkey (sum (* ps_supplycost ps_availqty))]
+                :keys [ps_partkey value]
+                :where [[ps :_table partsupp]
+                        [ps :ps_availqty ps_availqty]
+                        [ps :ps_supplycost ps_supplycost]
+                        [ps :ps_partkey ps_partkey]
+                        [ps :ps_suppkey s]
+                        [s :s_nationkey n]
+                        [n :n_name "GERMANY"]]})
+            [(> value (* 0.0001 total-value))]]
     :order-by [[value :desc]]})
 
 ;; TODO nested agg exprs, #583
-;; TODO performance on 0.01
+;; TODO select + mega join
 (def q12
   (-> '{:find [l_shipmode
                (sum high-line-count)
@@ -324,6 +403,7 @@
                          [(< l_shipdate #inst "1995-10-01")]]})
              [[promo total]]]]})
 
+;; TODO this has a view which we currently bind back as a value containing a relation
 (def q15
   '{:find [s s_name s_address s_phone total_revenue]
     :where [[(q {:find [s (* l_extendedprice (- 1 l_discount))]
@@ -349,17 +429,18 @@
         :keys [p_brand p_type p_size supplier_cnt]
         :in [[p_size ...]]
         :where [[p :_table :part]
+                [ps :_table :partsupp]
+
                 [p :p_brand p_brand]
                 [(<> p_brand "Brand#45")]
                 [p :p_type p_type]
                 [(not (like p_type "MEDIUM POLISHED%"))]
                 [p :p_size p_size]
 
-                [ps :_table :partsupp]
                 [ps :ps_partkey p]
                 [ps :ps_suppkey s]
 
-                (not-join [s]
+                (not-exists? [s]
                           [s :_table :supplier]
                           [s :s_comment s_comment]
                           [(like "%Customer%Complaints%" s_comment)])]
@@ -367,30 +448,44 @@
                    [p_brand :asc]
                    [p_type :asc]
                    [p_size :asc]]}
+
+      ;; TODO set
       (with-in-args [[3 9 14 19 23 36 45 49]])))
 
+;; TODO sub query
 (def q17
   '{:find [avg_yearly]
-    :where [[(q {:find [(sum l_extendedprice)]
-                 :where [[p :p_brand "Brand#23"]
-                         [p :p_container "MED BOX"]
-                         [l :l_partkey p]
-                         [(q {:find [(avg l_quantity)]
-                              :in [$ p]
-                              :where [[l :l_partkey p]
-                                      [l :l_quantity l_quantity]]} p) [[avg_quantity]]]
-                         [(* 0.2 avg_quantity) ret_1]
-                         [l :l_quantity l_quantity]
-                         [(< l_quantity ret_1)]
-                         [l :l_extendedprice l_extendedprice]]}) [[sum_extendedprice]]]
+    :where [(q {:find [(sum l_extendedprice)]
+                :keys [sum_extendedprice]
+                :where [[p :_table :part]
+                        [l :_table :lineitem]
+
+                        [p :p_brand "Brand#23"]
+                        [p :p_container "MED BOX"]
+                        [l :l_partkey p]
+                        [l :l_quantity l_quantity]
+                        [l :l_extendedprice l_extendedprice]
+
+                        (q {:find [(avg l_quantity)]
+                            :in [p]
+                            :keys [avg_quantity]
+                            :where [[l :l_partkey p]
+                                    [l :l_quantity l_quantity]]})
+
+                        [(< l_quantity (* 0.2 avg_quantity))]]})
+
             [(/ sum_extendedprice 7.0) avg_yearly]]})
 
+;; TODO sub-query
 (def q18
   '{:find [c_name c o o_orderdate o_totalprice sum_quantity]
-    :where [[(q {:find [o (sum l_quantity)]
-                 :where [[l :l_orderkey o]
-                         [l :l_quantity l_quantity]]})
-             [[o sum_quantity]]]
+    :where [[o :_table :orders]
+            [c :_table :customer]
+            (q {:find [o (sum l_quantity)]
+                :keys [o sum_quantity]
+                :where [[l :_table :lineitem]
+                        [l :l_orderkey o]
+                        [l :l_quantity l_quantity]]})
             [(> sum_quantity 300.0)]
             [o :o_custkey c]
             [c :c_name c_name]
@@ -399,83 +494,114 @@
     :order-by [[o_totalprice :desc] [o_orderdate :asc]]
     :limit 100})
 
+;; TODO cardinality-many literals
+;; TODO agg exprs
 (def q19
-  '{:find [(sum (* l_extendedprice (- 1 l_discount)))]
-    :where [[l :l_shipmode #{"AIR" "AIR REG"}]
-            [l :l_shipinstruct "DELIVER IN PERSON"]
-            [l :l_discount l_discount]
-            [l :l_extendedprice l_extendedprice]
-            [l :l_partkey p]
-            [l :l_quantity l_quantity]
-            [p :p_size p_size]
-            (or (and [p :p_brand "Brand#12"]
-                     [p :p_container #{"SM CASE" "SM BOX" "SM PACK" "SM PKG"}]
-                     [(>= l_quantity 1.0)]
-                     [(<= l_quantity 11.0)]
-                     [(>= p_size 1)]
-                     [(<= p_size 5)])
-                (and [p :p_brand "Brand#23"]
-                     [p :p_container #{"MED BAG" "MED BOX" "MED PKG" "MED PACK"}]
-                     [(>= l_quantity 10.0)]
-                     [(<= l_quantity 20.0)]
-                     [(>= p_size 1)]
-                     [(<= p_size 10)])
-                (and [p :p_brand "Brand#34"]
-                     [p :p_container #{"LG CASE" "LG BOX" "LG PACK" "LG PKG"}]
-                     [(>= l_quantity 20.0)]
-                     [(<= l_quantity 30.0)]
-                     [(>= p_size 1)]
-                     [(<= p_size 15)]))]})
+  (-> '{:find [(sum (* l_extendedprice (- 1 l_discount)))]
+        :in [[l_shipmode ...]]
+        :where [[l :_table :lineitem]
+                [p :_table :part]
 
+                [l :l_shipmode l_shipmode]
+                [l :l_shipinstruct "DELIVER IN PERSON"]
+                [l :l_discount l_discount]
+                [l :l_extendedprice l_extendedprice]
+                [l :l_partkey p]
+                [l :l_quantity l_quantity]
+                [p :p_size p_size]
+
+                (union-join [p l_quantity p_size]
+                           (and [p :p_brand "Brand#12"]
+                                [p :p_container #{"SM CASE" "SM BOX" "SM PACK" "SM PKG"}]
+                                [(>= l_quantity 1.0)]
+                                [(<= l_quantity 11.0)]
+                                [(>= p_size 1)]
+                                [(<= p_size 5)])
+                           (and [p :p_brand "Brand#23"]
+                                [p :p_container #{"MED BAG" "MED BOX" "MED PKG" "MED PACK"}]
+                                [(>= l_quantity 10.0)]
+                                [(<= l_quantity 20.0)]
+                                [(>= p_size 1)]
+                                [(<= p_size 10)])
+                           (and [p :p_brand "Brand#34"]
+                                [p :p_container #{"LG CASE" "LG BOX" "LG PACK" "LG PKG"}]
+                                [(>= l_quantity 20.0)]
+                                [(<= l_quantity 30.0)]
+                                [(>= p_size 1)]
+                                [(<= p_size 15)]))]}
+
+      (with-in-args [#{"AIR" "AIR REG"}])))
+
+;; TODO sub-query
 (def q20
-  '{:find [s_name
-           s_address]
-    :where [[ps :ps_suppkey s]
-            [ps :ps_partkey p]
+  '{:find [s_name s_address]
+    :where [[ps :_table :partsupp]
+            [p :_table :part]
+            [s :_table :supplier]
+            [n :_table :nation]
+
             [p :p_name p_name]
-            [(re-find #"^forest.*" p_name)]
-            [(q {:find [(sum l_quantity)]
-                 :in [$ p s]
-                 :where [[l :l_partkey p]
-                         [l :l_suppkey s]
-                         [l :l_shipdate l_shipdate]
-                         [(>= l_shipdate #inst "1994-01-01")]
-                         [(< l_shipdate #inst "1995-01-01")]
-                         [l :l_quantity l_quantity]]} p s) [[sum_quantity]]]
-            [(* sum_quantity 0.5) ret_1]
-            [(long ret_1) ret_2]
-            [ps :ps_availqty ps_availqty]
-            [(> ps_availqty ret_2)]
+            [(like p_name "forest%")]
+
             [s :s_name s_name]
             [s :s_address s_address]
             [s :s_nationkey n]
-            [n :n_name "CANADA"]]
+            [n :n_name "CANADA"]
+
+            [ps :ps_suppkey s]
+            [ps :ps_partkey p]
+            [ps :ps_availqty ps_availqty]
+            (q {:find [(sum l_quantity)]
+                :keys [sum_quantity]
+                :in [p s]
+                :where [[l :l_partkey p]
+                        [l :l_suppkey s]
+                        [l :l_shipdate l_shipdate]
+                        [(>= l_shipdate #inst "1994-01-01")]
+                        [(< l_shipdate #inst "1995-01-01")]
+                        [l :l_quantity l_quantity]]} p s)
+            [(> ps_availqty (* sum_quantity 0.5))]]
     :order-by [[s_name :asc]]})
 
 (def q21
-  '{:find [s_name
-           (count l1)]
-    :where [[l1 :l_suppkey s]
-            [s :s_name s_name]
-            [l1 :l_orderkey o]
+  '{:find [s_name (count l1)]
+    :where [[o :_table :orders]
+            [s :_table :supplier]
+            [l1 :_table :lineitem]
+            [n :_table :nation]
+
             [o :o_orderstatus "F"]
+
+            [s :s_name s_name]
+            [s :s_nationkey n]
+            [n :n_name "SAUDI ARABIA"]
+
+            [l1 :l_suppkey s]
+            [l1 :l_orderkey o]
             [l1 :l_receiptdate l_receiptdate]
             [l1 :l_commitdate l_commitdate]
+
             [(> l_receiptdate l_commitdate)]
-            (or-join [o s]
-                     (and [l2 :l_orderkey o]
-                          (not [l2 :l_suppkey s])))
-            (not-join [o s]
+
+            (exists? [o s]
+                     [l2 :_table :lineitem]
+                     [l2 :l_orderkey o]
+                     [l2 :l_suppkey l2s]
+                     [(<> s l2s)])
+
+            (not-exists? [o s]
+                      [l3 :_table :lineitem]
                       [l3 :l_orderkey o]
-                      (not [l3 :l_suppkey s])
+                      [l3 :l_suppkey l3s]
+                      [(<> s l3s)]
                       [l3 :l_receiptdate l_receiptdate]
                       [l3 :l_commitdate l_commitdate]
-                      [(> l_receiptdate l_commitdate)])
-            [s :s_nationkey n]
-            [n :n_name "SAUDI ARABIA"]]
+                      [(> l_receiptdate l_commitdate)])]
+
     :order-by [[(count l1) :desc] [s_name :asc]]
     :limit 100})
 
+;; TODO sub queries
 (def q22
   '{:find [cntrycode
            (count c)
@@ -483,15 +609,16 @@
     :where [[c :c_phone c_phone]
             [(subs c_phone 0 2) cntrycode]
             [(contains? #{"13" "31" "23" "29" "30" "18" "17"} cntrycode)]
-            [(q {:find [(avg c_acctbal)]
-                 :where [[c :c_acctbal c_acctbal]
-                         [(> c_acctbal 0.0)]
-                         [c :c_phone c_phone]
-                         [(subs c_phone 0 2) cntrycode]
-                         [(contains? #{"13" "31" "23" "29" "30" "18" "17"} cntrycode)]]}) [[avg_acctbal]]]
+            (q {:find [(avg c_acctbal)]
+                :keys [avg_acctbal]
+                :where [[c :c_acctbal c_acctbal]
+                        [(> c_acctbal 0.0)]
+                        [c :c_phone c_phone]
+                        [(subs c_phone 0 2) cntrycode]
+                        [(contains? #{"13" "31" "23" "29" "30" "18" "17"} cntrycode)]]})
             [c :c_acctbal c_acctbal]
             [(> c_acctbal avg_acctbal)]
-            (not-join [c]
+            (not-exists? [c]
                       [o :o_custkey c])]
     :order-by [[cntrycode :asc]]})
 
