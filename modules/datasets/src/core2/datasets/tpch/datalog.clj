@@ -270,24 +270,33 @@
             [(> value ret_2)]]
     :order-by [[value :desc]]})
 
-(def high-lines #{"1-URGENT" "2-HIGH"})
-
+;; TODO nested agg exprs, #583
+;; TODO performance on 0.01
 (def q12
-  '{:find [l_shipmode
-           (sum (if (xtdb.fixtures.tpch/high-lines o_orderpriority) 1 0))
-           (sum (if (xtdb.fixtures.tpch/high-lines o_orderpriority) 0 1))]
-    :where [[l :l_orderkey o]
-            [l :l_receiptdate l_receiptdate]
-            [l :l_commitdate l_commitdate]
-            [l :l_shipdate l_shipdate]
-            [(>= l_receiptdate #inst "1994-01-01")]
-            [(< l_receiptdate #inst "1995-01-01")]
-            [(< l_commitdate l_receiptdate)]
-            [(< l_shipdate l_commitdate)]
-            [l :l_shipmode l_shipmode]
-            [l :l_shipmode #{"MAIL" "SHIP"}]
-            [o :o_orderpriority o_orderpriority]]
-    :order-by [[l_shipmode :asc]]})
+  (-> '{:find [l_shipmode
+               (sum high-line-count)
+               (sum low-line-count)]
+        :keys [l_shipmode high_line_count low_line_count]
+        :in [[l_shipmode ...]]
+        :where [[l :_table :lineitem]
+                [l :l_orderkey o]
+                [l :l_receiptdate l_receiptdate]
+                [l :l_commitdate l_commitdate]
+                [l :l_shipdate l_shipdate]
+                [l :l_shipmode l_shipmode]
+                [(>= l_receiptdate #inst "1994-01-01")]
+                [(< l_receiptdate #inst "1995-01-01")]
+                [(< l_commitdate l_receiptdate)]
+                [(< l_shipdate l_commitdate)]
+
+                [o :_table :orders]
+                [o :o_orderpriority o_orderpriority]
+
+                [(case o_orderpriority "1-URGENT" 1, "2-HIGH" 1, 0) high-line-count]
+                [(case o_orderpriority "1-URGENT" 0, "2-HIGH" 0, 1) low-line-count]]
+        :order-by [[l_shipmode :asc]]}
+
+      (with-in-args [#{"MAIL" "SHIP"}])))
 
 (def q13
   '{:find [c_count (count c_count)]
