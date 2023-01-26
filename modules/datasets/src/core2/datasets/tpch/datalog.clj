@@ -333,25 +333,32 @@
             [s :s_phone s_phone]]})
 
 (def q16
-  '{:find [p_brand
-           p_type
-           p_size
-           (count-distinct s)]
-    :where [[p :p_brand p_brand]
-            [(not= p_brand "Brand#45")]
-            [p :p_type p_type]
-            (not [(re-find #"^MEDIUM POLISHED.*" p_type)])
-            [p :p_size p_size]
-            [p :p_size #{49 14 23 45 19 3 36 9}]
-            [ps :ps_partkey p]
-            [ps :ps_suppkey s]
-            (not-join [s]
-                      [s :s_comment s_comment]
-                      [(re-find #".*Customer.*Complaints.*" s_comment)])]
-    :order-by [[(count-distinct s) :desc]
-               [p_brand :asc]
-               [p_type :asc]
-               [p_size :asc]]})
+  (-> '{:find [p_brand
+               p_type
+               p_size
+               (count-distinct s)]
+        :keys [p_brand p_type p_size supplier_cnt]
+        :in [[p_size ...]]
+        :where [[p :_table :part]
+                [p :p_brand p_brand]
+                [(<> p_brand "Brand#45")]
+                [p :p_type p_type]
+                [(not (like p_type "MEDIUM POLISHED%"))]
+                [p :p_size p_size]
+
+                [ps :_table :partsupp]
+                [ps :ps_partkey p]
+                [ps :ps_suppkey s]
+
+                (not-join [s]
+                          [s :_table :supplier]
+                          [s :s_comment s_comment]
+                          [(like "%Customer%Complaints%" s_comment)])]
+        :order-by [[(count-distinct s) :desc]
+                   [p_brand :asc]
+                   [p_type :asc]
+                   [p_size :asc]]}
+      (with-in-args [[3 9 14 19 23 36 45 49]])))
 
 (def q17
   '{:find [avg_yearly]
