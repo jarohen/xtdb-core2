@@ -39,6 +39,16 @@
          :clauses (s/and vector? (s/spec (s/* ::where-clause)))
          :query ::query))
 
+(s/def ::project-clause
+  (s/or :star #{'*}
+        :column ::column
+        :extends (s/map-of ::column ::form, :conform-keys true)))
+
+(defmethod query-spec :project [_]
+  (s/cat :op #{:project}
+         :clauses (s/and vector? (s/spec (s/* ::project-clause)))
+         :query (s/? ::query)))
+
 (defn- conform-query [query]
   (let [conformed-query (s/conform ::query query)]
     (when (s/invalid? conformed-query)
@@ -55,37 +65,31 @@
    (col-sym (str prefix col))))
 
 (defn- wrap-select [plan predicates]
-  (case (count predicates)
-    0 plan
-    1 [:select (first predicates) plan]
-    [:select (list* 'and predicates) plan]))
+  (-> (case (count predicates)
+        0 plan
+        1 [:select (first predicates) plan]
+        [:select (list* 'and predicates) plan])
+      (with-meta (meta plan))))
 
-(defn- unify-plans [plans]
+(defn- wrap-unify [plan plans]
   (let [var->cols (-> plans
-                      (->> (mapcat (fn [clause-plan]
-                                     (:var->col (meta clause-plan))))
+                      (->> (mapcat (comp :var->col meta))
                            (group-by key))
                       (update-vals #(into #{} (map val) %))
                       (into {}))]
-
-    {:var->cols var->cols
-     :var->col (->> var->cols
-                    (into {} (map (juxt key (comp first val)))))}))
-
-(defn- wrap-unify [plan {:keys [var->cols var->col]}]
-  (-> [:project (vec (for [[lv cols] var->cols]
-                       (if (contains? cols lv)
-                         lv
-                         {lv (first cols)})))
-       (-> plan
-           (wrap-select (vec
-                         (for [cols (vals var->cols)
-                               :when (> (count cols) 1)
-                               ;; this picks an arbitrary binary order if there are >2
-                               ;; once mega-join has multi-way joins we could throw the multi-way `=` over the fence
-                               [c1 c2] (partition 2 1 cols)]
-                           (list '= c1 c2)))))]
-      (vary-meta assoc :var->col var->col)))
+    (-> [:project (vec (for [[lv cols] var->cols]
+                         (if (contains? cols lv)
+                           lv
+                           {lv (first cols)})))
+         (-> plan
+             (wrap-select (vec
+                           (for [cols (vals var->cols)
+                                 :when (> (count cols) 1)
+                                 ;; this picks an arbitrary binary order if there are >2
+                                 ;; once mega-join has multi-way joins we could throw the multi-way `=` over the fence
+                                 [c1 c2] (partition 2 1 cols)]
+                             (list '= c1 c2)))))]
+        (vary-meta assoc :var->col (into {} (map (juxt identity identity) (keys var->cols)))))))
 
 (defmethod plan-query :match [{:keys [clauses query]}]
     (let [clause-plans (->> clauses
@@ -106,26 +110,54 @@
                                    (-> [:rename prefix plan]
                                        (with-meta {:var->col var->col})))))))]
       (-> [:mega-join [] plans]
-          (wrap-unify (unify-plans plans)))))
+          (wrap-unify plans))))
+
+(defn- unform-form [var->col form]
+  (letfn [(unform* [[form-type form-arg]]
+            (case form-type
+              :literal form-arg
+              :symbol (var->col form-arg)
+              :call (let [{:keys [f args]} form-arg]
+                      (list* f (mapv unform* args)))))]
+    (unform* form)))
 
 (defmethod plan-query :where [{:keys [clauses query]}]
   (let [plan (plan-query query)
         {:keys [var->col]} (meta plan)]
     (-> plan
         (wrap-select (for [clause clauses]
-                       (letfn [(unform [[form-type form-arg]]
-                                 (case form-type
-                                   :literal form-arg
-                                   :symbol (var->col form-arg)
-                                   :call (let [{:keys [f args]} form-arg]
-                                           (list* f (map unform args)))))]
-                         (unform clause)))))))
+                       (unform-form var->col clause))))))
+
+(defmethod plan-query :project [{:keys [clauses query]}]
+  (let [plan (plan-query query)
+        {:keys [var->col]} (meta plan)
+        projections (->> clauses
+                         (reduce (fn [acc [p-type p-arg :as p]]
+                                   (case p-type
+                                     :star (into acc
+                                                 (map (juxt identity (fn [lv] [:column lv])))
+                                                 (keys var->col))
+                                     :column (-> acc (assoc p-arg p))
+                                     :extends (into acc
+                                                    (map (fn [[out-col form]]
+                                                           [out-col [:extends form]]))
+                                                    p-arg)))
+                                 {}))]
+    (-> [:project (->> projections
+                       (mapv (fn [[out-col [p-type p-arg]]]
+                               {out-col
+                                (case p-type
+                                  :column p-arg
+                                  :extends (unform-form var->col p-arg))})))
+         plan]
+        (with-meta {:var->col (into {} (map (juxt key key)) projections)}))))
 
 (comment
-  (compile-query '[:where [(> id 4)
-                           (< id 2)]
-                   [:match [(users [id])
-                            (products [id])]]]))
+  (compile-query '[:project [* id {id2 (* id 2)}]
+                   [:where [(> id 4)
+                            (< id 2)]
+                    [:match [(users [uid])
+                             (products [id])]]]]))
 
 (defn compile-query [query]
   (-> (conform-query query)
