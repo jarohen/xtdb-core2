@@ -49,6 +49,31 @@
          :clauses (s/and vector? (s/spec (s/* ::project-clause)))
          :query (s/? ::query)))
 
+(s/def ::limit nat-int?)
+(s/def ::offset nat-int?)
+
+(defmethod query-spec :top [_]
+  (s/cat :op #{:top}
+         :top-params (s/keys :opt-un [::limit ::offset])
+         :query ::query))
+
+(s/def ::order-by-value ::column)
+
+(s/def ::order-by-spec
+  (s/and (s/or :value ::order-by-value
+               :value+direction (s/cat :value ::order-by-value
+                                       :direction #{:asc :desc}))
+         (s/conformer (fn [[obs-type obs-arg]]
+                        (case obs-type
+                          :value {:value obs-arg, :direction :asc}
+                          :value+direction obs-arg))
+                      (fn [v] [:value+direction v]))))
+
+(defmethod query-spec :order-by [_]
+  (s/cat :op #{:order-by}
+         :order-by-specs (s/and vector? (s/spec (s/* ::order-by-spec)))
+         :query ::query))
+
 (defn- conform-query [query]
   (let [conformed-query (s/conform ::query query)]
     (when (s/invalid? conformed-query)
@@ -152,12 +177,25 @@
          plan]
         (with-meta {:var->col (into {} (map (juxt key key)) projections)}))))
 
+(defmethod plan-query :top [{:keys [top-params query]}]
+  (let [plan (plan-query query)]
+    (-> [:top top-params plan]
+        (with-meta (meta plan)))))
+
+(defmethod plan-query :order-by [{:keys [order-by-specs query]}]
+  (let [plan (plan-query query)]
+    (-> [:order-by (mapv (juxt :value :direction) order-by-specs)
+         plan]
+        (with-meta (meta plan)))))
+
 (comment
-  (compile-query '[:project [* id {id2 (* id 2)}]
-                   [:where [(> id 4)
-                            (< id 2)]
-                    [:match [(users [uid])
-                             (products [id])]]]]))
+  (compile-query '[:order-by [id]
+                   [:top {:limit 10}
+                    [:project [* id {id2 (* id 2)}]
+                     [:where [(> id 4)
+                              (< uid 2)]
+                      [:match [(users [uid])
+                               (products [id])]]]]]]))
 
 (defn compile-query [query]
   (-> (conform-query query)
