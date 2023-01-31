@@ -200,3 +200,37 @@
 (defn compile-query [query]
   (-> (conform-query query)
       (plan-query)))
+
+
+;;;; QGM notes
+
+'
+[:mega-join [(= q0_b q1_b) (= q1_a q2_a)]
+ {q0 [:foreach [:scan r1 [b]]]
+  q1 [:foreach [:scan r2 [a b]]]
+  q2 [:preserving-foreach [:scan r3 [a]]]}]
+
+'
+[:mega-join [(= q0_b q1_b) (= q1_a q2_a)]
+ [[:scan r1 [b]]
+  [:scan r2 [a b]]
+  [:scan r3 [a]]]]
+
+;; IIRC:
+;; * no P quantifiers in a select box - these have to be in an specific outer join box
+;; * in an outer-join box, maximum one F quantifier (zero for FOJ)
+
+"SELECT * FROM r1 JOIN r2 USING (b) LEFT JOIN r3 USING (a) LEFT JOIN r4 USING (c)"
+
+'
+[:outer-join {a q2.a, b q2.b, c q3.c}
+ [(= q2.a q3.a) (= q3.c q4.c)]
+ {q2 [:foreach
+      [:select {a q0.a, b q1.b}
+       [(= q0.b q1.b)]
+       {q0 [:foreach [:base r1 [b]]]
+        q1 [:foreach [:base r2 [a b]]]}]]
+  q3 [:preserving-foreach
+      [:base r3 [a c]]]
+  q4 [:preserving-foreach
+      [:base r4 [c]]]}]
