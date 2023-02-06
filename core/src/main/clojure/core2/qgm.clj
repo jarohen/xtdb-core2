@@ -21,13 +21,16 @@
 (defmethod box-spec :scan [_]
   (s/tuple #{:scan}, ::table, (s/map-of ::column ::predicates)))
 
-(defmethod box-spec :join [_]
-  (s/tuple #{:join}, ::box-head, ::predicates, (s/map-of ::qid ::quantifier)))
+(defmethod box-spec :select [_]
+  (s/tuple #{:select}, ::box-head, ::predicates, (s/map-of ::qid ::quantifier)))
 
 (defmethod box-spec :group [_]
   (s/tuple #{:group}, (s/map-of ::column ::expression), ::box))
 
+(defmulti box-vars first)
 (defmulti plan-box first)
+
+(defmethod box-vars :scan [[_ _ scan-cols]] (set (keys scan-cols)))
 
 (defn- wrap-scan-col-pred [col preds]
   (case (count preds)
@@ -40,14 +43,16 @@
    (vec (for [[col col-preds] cols]
           (-> col (wrap-scan-col-pred col-preds))))])
 
-(defmethod plan-box :join [[_ _head _preds quantifiers]]
+(defmethod box-vars :select [[_ head _ _]] (set (keys head)))
+
+(defmethod plan-box :select [[_ _head _preds quantifiers]]
   ;; TODO projection/selection
   ;; TODO different q-types
   (->> quantifiers
        (map (fn [[_qid [_qid-type box]]]
               (plan-box box)))
        (reduce (fn [acc plan]
-                 [:join [] acc plan]))))
+                 [:select [] acc plan]))))
 
 (defmethod plan-box :group [[_ grouping-spec box]]
   ;; TODO
@@ -57,7 +62,7 @@
 (comment
   (plan-box (doto '[:group {foo [:grouping-key [:column foo]]
                             foo-count [:call * [:literal 2] [:aggregate :sum [:grouping-key [:column foo]]]]}
-                    [:join {foo [:column q0 foo]}
+                    [:select {foo [:column q0 foo]}
                      []
                      {q0 [:foreach
                           [:scan users
