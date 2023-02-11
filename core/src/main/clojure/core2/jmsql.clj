@@ -101,12 +101,15 @@
                          box-var [:column [qid box-var]]))
                       (->> (group-by key))
                       (update-vals #(into #{} (map val) %)))
-        unify-preds (->> var->cols
+        unify-preds (->> (vals var->cols)
                          (into [] (mapcat
-                                   (fn [[lv cols]]
+                                   (fn [cols]
                                      (when (> (count cols) 1)
-                                       (for [[c1 c2] (partition 2 1 cols)]
-                                         (list '= c1 c2)))))))
+                                       (for [[c1 & cs] (->> cols
+                                                            (iterate next)
+                                                            (take-while next))
+                                             c2 cs]
+                                         [:call '= c1 c2]))))))
         box-head (->> var->cols (into {} (map (juxt key (comp first val)))))]
 
     [:select box-head unify-preds qs]))
@@ -114,10 +117,10 @@
 (defn- unform-form [var->col form]
   (letfn [(unform* [[form-type form-arg]]
             (case form-type
-              :literal form-arg
+              :literal [:literal form-arg]
               :symbol (var->col form-arg)
               :call (let [{:keys [f args]} form-arg]
-                      (list* f (mapv unform* args)))))]
+                      (into [:call f] (mapv unform* args)))))]
     (unform* form)))
 
 (defmethod plan-query :where [{:keys [clauses query]}]
