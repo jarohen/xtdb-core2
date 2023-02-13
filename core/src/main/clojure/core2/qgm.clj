@@ -19,7 +19,7 @@
 (s/def ::predicates (s/coll-of ::expression, :kind vector?))
 
 (defmethod box-spec :scan [_]
-  (s/tuple #{:scan}, ::table, (s/map-of ::column ::predicates)))
+  (s/tuple #{:scan}, ::table, ::box-head, ::predicates))
 
 (defmethod box-spec :select [_]
   (s/tuple #{:select}, ::box-head, ::predicates, (s/map-of ::qid ::quantifier)))
@@ -40,6 +40,8 @@
 
 (defmethod plan-box :scan [[_ table cols]]
   [:scan table
+   ;; TODO plan out preds
+   #_
    (vec (for [[col col-preds] cols]
           (-> col (wrap-scan-col-pred col-preds))))])
 
@@ -60,15 +62,15 @@
    box])
 
 (comment
-  (plan-box (doto '[:group {foo [:grouping-key [:column foo]]
-                            foo-count [:call * [:literal 2] [:aggregate :sum [:grouping-key [:column foo]]]]}
-                    [:select {foo [:column q0 foo]}
-                     []
-                     {q0 [:foreach
-                          [:scan users
-                           {id [[:call = [:column id] [:param ?id]]]
-                            foo []}]]
-                      q1 [:foreach
-                          [:scan users
-                           {id []}]]}]]
+  (plan-box (doto #_'[:group {foo [:grouping-key [:column foo]]
+                            foo-count [:call * [:literal 2] [:aggregate :sum [:grouping-key [:column foo]]]]}]
+                  '
+              [:select {foo [:column q0 foo]}
+               []
+               {q0 [:foreach
+                    [:scan users {id [:column id], foo [:column foo]}
+                     [[:call = [:column id] [:param ?id]]]]]
+                q1 [:foreach
+                    [:scan users {id [:column id]}
+                     []]]}]
              (->> (s/assert ::box)))))

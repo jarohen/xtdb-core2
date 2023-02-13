@@ -9,19 +9,54 @@
 
 (s/def ::column simple-symbol?)
 (s/def ::table simple-symbol?)
+(s/def ::attr keyword?)
+(s/def ::literal any?)
+(s/def ::logic-var simple-symbol?)
 
 (s/def ::query
   (s/multi-spec query-spec (fn [v t] [t v])))
 
+(s/def ::match-value
+  (s/or :logic-var ::logic-var, :literal ::literal))
+
+(s/def ::single-map-match
+  (-> (s/map-of ::attr ::match-value)
+      (s/and (s/conformer vec #(into {} %)))))
+
+(s/def ::match-cols
+  (-> (s/or :single-map ::single-map-match
+            :vector (-> (s/or :column ::column
+                              :map (s/map-of ::attr ::match-value))
+                        (s/and (s/conformer (fn [[tag arg]]
+                                              (case tag :map arg, :column {(keyword arg) [:logic-var arg]}))
+                                            (fn [arg]
+                                              [:map arg])))
+                        (s/coll-of :kind vector?)))
+
+      (s/and (s/conformer (fn [[tag arg]]
+                            (case tag
+                              :single-map (vec arg)
+                              :vector (into [] cat arg)))
+                          (fn [v]
+                            [:vector (mapv #(conj {} %) v)])))))
+
+(s/def ::at-app-time ::literal)
+(s/def ::app-time-in (s/tuple (s/nilable ::literal) (s/nilable ::literal)))
+(s/def ::at-sys-time ::literal)
+(s/def ::sys-time-in (s/tuple (s/nilable ::literal) (s/nilable ::literal)))
+
+(s/def ::match-opts
+  (s/keys :opt-un [::at-app-time ::app-time-in ::at-sys-time ::sys-time-in]))
+
 (s/def ::match-clause
   (s/and list?
-         (s/cat :table ::table
-                :cols (s/and vector?
-                             (s/spec (s/* ::column))))))
+         (s/cat :table ::table,
+                :match-cols ::match-cols
+                :opts (s/? ::match-opts))))
 
 (defmethod query-spec :match [_]
   (s/cat :op #{:match}
-         :clauses (s/and vector? (s/spec (s/* ::match-clause)))
+         :clauses (s/coll-of ::match-clause, :kind vector?)
          :query (s/? ::query)))
 
 (s/def ::call
@@ -38,7 +73,7 @@
 
 (defmethod query-spec :where [_]
   (s/cat :op #{:where}
-         :clauses (s/and vector? (s/spec (s/* ::where-clause)))
+         :clauses (s/coll-of ::where-clause, :kind vector?)
          :query ::query))
 
 (s/def ::project-clause
@@ -48,7 +83,7 @@
 
 (defmethod query-spec :project [_]
   (s/cat :op #{:project}
-         :clauses (s/and vector? (s/spec (s/* ::project-clause)))
+         :clauses (s/coll-of ::project-clause, :kind vector?)
          :query (s/? ::query)))
 
 (s/def ::limit nat-int?)
@@ -65,15 +100,15 @@
   (s/and (s/or :value ::order-by-value
                :value+direction (s/cat :value ::order-by-value
                                        :direction #{:asc :desc}))
-         (s/conformer (fn [[obs-type obs-arg]]
-                        (case obs-type
+         (s/conformer (fn [[obs-tag obs-arg]]
+                        (case obs-tag
                           :value {:value obs-arg, :direction :asc}
                           :value+direction obs-arg))
                       (fn [v] [:value+direction v]))))
 
 (defmethod query-spec :order-by [_]
   (s/cat :op #{:order-by}
-         :order-by-specs (s/and vector? (s/spec (s/* ::order-by-spec)))
+         :order-by-specs (s/coll-of ::order-by-spec, :kind vector?)
          :query ::query))
 
 (defn- conform-query [query]
@@ -85,10 +120,35 @@
                                :explain (s/explain-data ::query query)})))
     conformed-query))
 
+(defn- ->unify-preds [var->cols]
+  (->> (vals var->cols)
+       (into [] (mapcat
+                 (fn [cols]
+                   (for [[c1 & cs] (iterate next cols)
+                         :while cs
+                         c2 cs]
+                     [:call '= c1 c2]))))))
+
+(defn- plan-match-clause [{:keys [table match-cols]}]
+  (let [match-cols (->> match-cols
+                        (mapv (fn [[a v]]
+                                (MapEntry/create [:column (symbol a)] v))))
+        var->cols (-> match-cols
+                      (->> (keep (fn [[a [v-tag v-arg]]]
+                                   (when (= v-tag :logic-var)
+                                     (MapEntry/create v-arg a))))
+                           (group-by key))
+                      (update-vals vals))]
+
+    [:scan (symbol table) (-> var->cols (update-vals first))
+     (vec (concat (->> match-cols
+                       (keep (fn [[a [v-tag :as v]]]
+                               (when (= :literal v-tag)
+                                 [:call '= a v]))))
+                  (->unify-preds var->cols)))]))
+
 (defmethod plan-query :match [{:keys [clauses query]}]
-  (let [plans (cond->> (->> clauses
-                            (mapv (fn [{:keys [table cols]}]
-                                    [:scan table (zipmap cols (repeat []))])))
+  (let [plans (cond->> (mapv plan-match-clause clauses)
                 query (cons (plan-query query)))
         qs (->> plans
                 (into {} (map-indexed
@@ -97,26 +157,17 @@
                              [:foreach plan]]))))
         var->cols (-> (for [[qid [_ plan]] qs
                             box-var (qgm/box-vars plan)]
-                        (MapEntry/create
-                         box-var [:column [qid box-var]]))
+                        (MapEntry/create box-var [:column [qid box-var]]))
                       (->> (group-by key))
-                      (update-vals #(into #{} (map val) %)))
-        unify-preds (->> (vals var->cols)
-                         (into [] (mapcat
-                                   (fn [cols]
-                                     (when (> (count cols) 1)
-                                       (for [[c1 & cs] (->> cols
-                                                            (iterate next)
-                                                            (take-while next))
-                                             c2 cs]
-                                         [:call '= c1 c2]))))))
-        box-head (->> var->cols (into {} (map (juxt key (comp first val)))))]
+                      (update-vals vals))]
 
-    [:select box-head unify-preds qs]))
+    [:select (-> var->cols (update-vals first))
+     (->unify-preds var->cols)
+     qs]))
 
 (defn- unform-form [var->col form]
-  (letfn [(unform* [[form-type form-arg]]
-            (case form-type
+  (letfn [(unform* [[form-tag form-arg]]
+            (case form-tag
               :literal [:literal form-arg]
               :symbol (var->col form-arg)
               :call (let [{:keys [f args]} form-arg]
@@ -148,8 +199,8 @@
                                             [:column 'q lv])))))
         projections (->> clauses
                          (reduce
-                          (fn [acc [p-type p-arg :as p]]
-                            (case p-type
+                          (fn [acc [p-tag p-arg]]
+                            (case p-tag
                               :star (into acc
                                           (map (juxt identity (fn [lv] [:column 'q lv])))
                                           (qgm/box-vars plan))
