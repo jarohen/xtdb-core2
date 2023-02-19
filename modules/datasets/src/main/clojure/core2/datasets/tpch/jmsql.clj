@@ -1,10 +1,11 @@
-(ns core2.datasets.tpch.jmsql)
+(ns core2.datasets.tpch.jmsql
+  (:require [core2.jmsql :as jmsql]))
 
 (defn- with-params [q params]
   (vary-meta q assoc ::params params))
 
 (def q1-pricing-summary-report
-  (-> '[:order-by [l_returnflag l_linestatus]
+  (-> '[:order [l_returnflag l_linestatus]
         [:group [l_returnflag l_linestatus
                  {sum_qty (sum l_quantity)
                   sum_base_price (sum l_extendedprice)
@@ -15,7 +16,7 @@
                   avg_disc (avg l_discount)
                   count_order (count *)}]
          [:project [* {disc_price (* l_extendedprice (- 1 l_discount))}]
-          [:where (<= l_shipdate (- #time/date "1998-12-01" $delta))
+          [:where [(<= l_shipdate (- #time/date "1998-12-01" $delta))]
            [:match [(lineitem [l_shipdate l_returnflag l_linestatus
                                l_quantity l_extendedprice l_discount
                                l_tax])]]]]]]
@@ -26,7 +27,7 @@
                   n_name
                   p_partkey p_mfgr
                   s_address s_phone s_comment]
-        [:order-by [[s_acctbal :desc] n_name s_name p_partkey]
+        [:order [[s_acctbal :desc] n_name s_name p_partkey]
          [:where [(= ps_supplycost
                      (q [:using #{p}
                          [:group [{min_cost (min ps_supplycost)}]
@@ -44,7 +45,7 @@
       (with-params {:region "EUROPE", :size 15})))
 
 (def q3-shipping-priority
-  (-> '[:order-by [[revenue :desc] o_orderdate]
+  (-> '[:order [[revenue :desc] o_orderdate]
         [:group [l_orderkey o_orderdate o_shippriority
                  {revenue (sum (* l_extendedprice (- 1 l_discount)))}]
          [:where [(< o_orderdate $date)
@@ -54,20 +55,22 @@
                    (lineitem [{:l_orderkey o} l_shipdate l_extendedprice l_discount])]]]]]
       (with-params {:segment "BUILDING", :date #time/date "1995-03-15"})))
 
+(jmsql/compile-query q3-shipping-priority)
+
 (def q4-order-priority-checking
-  (-> '[:order-by [o_orderpriority]
+  (-> '[:order [o_orderpriority]
         [:group [o_orderpriority {order_count (count *)}]
          [:where [(>= o_orderdate $date)
                   (< o_orderdate (+ $date #time/period "P3M"))
-                  (exists? [:using #{o}
-                            [:where [(< l_commitdate l_receiptdate)]
-                             [:match [(lineitem [{:l_orderkey o} l_commitdate l_receiptdate])]]]])]
-          [:match [{o (order [o_orderpriority o_orderdate])}]]]]]
+                  (exists? (q [:using #{o}
+                               [:where [(< l_commitdate l_receiptdate)]
+                                [:match [(lineitem [{:l_orderkey o} l_commitdate l_receiptdate])]]]]))]
+          [:match [(order [{:id o} o_orderpriority o_orderdate])]]]]]
 
       (with-params {:date #time/date "1993-07-01"})))
 
 (def q5-local-supplier-volume
-  (-> '[:order-by [[revenue :desc]]
+  (-> '[:order [[revenue :desc]]
         [:group [n_name
                  {revenue (sum (* l_extendedprice (- 1 l_discount)))}]
          [:where [(>= o_orderdate $date)
@@ -81,144 +84,98 @@
 
       (with-params {:date #time/date "1994-01-01"})))
 
-#_
 (def q6-forecasting-revenue-change
-  (-> '[:group-by [{revenue (sum disc_price)}]
+  (-> '[:group [{revenue (sum disc_price)}]
         [:project [{disc_price (* l_extendedprice l_discount)}]
-         [:scan
-          lineitem
-          [{l_shipdate (and (>= l_shipdate ?start-date)
-                            (< l_shipdate ?end-date))}
-           l_extendedprice
-           {l_discount (and (>= l_discount ?min-discount)
-                            (<= l_discount ?max-discount))}
-           {l_quantity (< l_quantity 24.0)}]]]]
+         [:where [(>= l_shipdate ?start-date)
+                  (< l_shipdate ?end-date)
+                  (>= l_discount ?min-discount)
+                  (<= l_discount ?max-discount)
+                  (< l_quantity 24.0)]
+          [:match [(lineitem [l_extendedprice l_shipdate l_discount l_quantity])]]]]]
       (with-params {'?start-date #time/date "1994-01-01"
                     '?end-date #time/date "1995-01-01"
                     '?min-discount 0.05
                     '?max-discount 0.07})))
 
-#_
 (def q7-volume-shipping
-  (-> '[:order-by [[supp_nation] [cust_nation] [l_year]]
-        [:group-by [supp_nation cust_nation l_year {revenue (sum volume)}]
+  (-> '[:order [supp_nation cust_nation l_year]
+        [:group [supp_nation cust_nation l_year
+                 {revenue (sum volume)}]
          [:project [supp_nation cust_nation
-                    {l_year (extract "YEAR" l_shipdate)}
-                    {volume (* l_extendedprice (- 1 l_discount))}]
-          [:rename {n1_n_name supp_nation, n2_n_name cust_nation}
-           [:join [{c_nationkey n2_n_nationkey}
-                   (or (and (= n1_n_name ?nation1)
-                            (= n2_n_name ?nation2))
-                       (and (= n1_n_name ?nation2)
-                            (= n2_n_name ?nation1)))]
-            [:join [{o_custkey c_custkey}]
-             [:join [{s_nationkey n1_n_nationkey}]
-              [:join [{l_orderkey o_orderkey}]
-               [:join [{s_suppkey l_suppkey}]
-                [:scan supplier [s_suppkey s_nationkey]]
-                [:scan
-                 lineitem
-                 [l_orderkey l_extendedprice l_discount l_suppkey
-                  {l_shipdate (and (>= l_shipdate ?start-date)
-                                   (<= l_shipdate ?end-date))}]]]
-               [:scan orders [o_orderkey o_custkey]]]
-              [:rename n1
-               [:scan nation [{n_name (or (= n_name ?nation1) (= n_name ?nation2))} n_nationkey]]]]
-             [:scan customer [c_custkey c_nationkey]]]
-            [:rename n2
-             [:scan nation [{n_name (or (= n_name ?nation1) (= n_name ?nation2))} n_nationkey]]]]]]]]
+                    {l_year (extract :year l_shipdate)
+                     volume (* l_extendedprice (- 1 l_discount))}]
+          [:where [(or (and (= supp_nation "FRANCE")
+                            (= cust_nation "GERMANY"))
+                       (and (= supp_nation "GERMANY")
+                            (= cust_nation "FRANCE")))
+                   (>= l_shipdate ?start-date)
+                   (<= l_shipdate ?end-date)]
+           [:match [(supplier {:id s, :s_nationkey n1})
+                    (lineitem [{:l_suppkey s} l_extendedprice l_discount l_shipdate])
+                    (orders {:id o, :o_custkey c})
+                    (customer {:id c, :c_nationkey n2})
+                    (nation {:id n1, :n_name supp_nation})
+                    (nation {:id n2, :n_name cust_nation})]]]]]]
       (with-params {'?nation1 "FRANCE"
                     '?nation2 "GERMANY"
                     '?start-date #time/date "1995-01-01"
                     '?end-date #time/date "1996-12-31"})))
 
-#_
 (def q8-national-market-share
-  (-> '[:order-by [[o_year]]
-        [:project [o_year {mkt_share (/ brazil_revenue revenue)}]
-         [:group-by [o_year {brazil_revenue (sum brazil_volume)} {revenue (sum volume)}]
-          [:project [{o_year (extract "YEAR" o_orderdate)}
-                     {brazil_volume (if (= nation ?nation)
-                                      (* l_extendedprice (- 1 l_discount))
-                                      0.0)}
-                     {volume (* l_extendedprice (- 1 l_discount))}
-                     nation]
-           [:rename {n2_n_name nation}
-            [:join [{s_nationkey n2_n_nationkey}]
-             [:join [{c_nationkey n1_n_nationkey}]
-              [:join [{o_custkey c_custkey}]
-               [:join [{l_orderkey o_orderkey}]
-                [:join [{l_suppkey s_suppkey}]
-                 [:join [{p_partkey l_partkey}]
-                  [:scan part [p_partkey {p_type (= p_type ?type)}]]
-                  [:scan lineitem [l_orderkey l_extendedprice l_discount l_suppkey l_partkey]]]
-                 [:scan supplier [s_suppkey s_nationkey]]]
-                [:scan
-                 orders
-                 [o_orderkey o_custkey
-                  {o_orderdate (and (>= o_orderdate ?start-date)
-                                    (<= o_orderdate ?end-date))}]]]
-               [:scan customer [c_custkey c_nationkey]]]
-              [:join [{r_regionkey n1_n_regionkey}]
-               [:scan region [r_regionkey {r_name (= r_name ?region)}]]
-               [:rename n1
-                [:scan nation [n_name n_nationkey n_regionkey]]]]]
-             [:rename n2
-              [:scan nation [n_name n_nationkey]]]]]]]]]
-      (with-params {'?nation "BRAZIL"
-                    '?region "AMERICA"
-                    '?type "ECONOMY ANODIZED STEEL"
-                    '?start-date #time/date "1995-01-01"
-                    '?end-date #time/date "1996-12-31"})))
+  (-> '[:order [o_year]
+        [:group [o_year {mkt_share (/ (sum brazil_volume) (sum volumet))}]
+         [:project [{o_year (extract :year o_orderdate)
+                     brazil_volume (if (= supp_nation $nation)
+                                     (* l_extendedprice (- 1 l_discount))
+                                     0.0)
+                     volume (* l_extendedprice (- 1 l_discount))}
+                    nation]
+          [:match [(part {:id p, :p_type $type})
+                   (supplier {:id s, :s_nationkey n2})
+                   (lineitem [{:l_suppkey s, :l_partkey p}
+                              l_extendedprice l_discount l_shipdate])
+                   (orders [{:id o, :o_custkey c} o_orderdate])
+                   (customer {:id c, :c_nationkey n1})
+                   (nation {:id n1, :n_regionkey r})
+                   (region {:id r, :r_name $region})
+                   (nation {:id n2, :n_name supp_nation})]]]]]
+      (with-params {:nation "BRAZIL"
+                    :region "AMERICA"
+                    :type "ECONOMY ANODIZED STEEL"
+                    :start-date #time/date "1995-01-01"
+                    :end-date #time/date "1996-12-31"})))
 
-#_
 (def q9-product-type-profit-measure
-  (-> '[:order-by [[nation] [o_year {:direction :desc}]]
-        [:group-by [nation o_year {sum_profit (sum amount)}]
-         [:rename {n_name nation}
-          [:project [n_name
-                     {o_year (extract "YEAR" o_orderdate)}
-                     {amount (- (* l_extendedprice (- 1 l_discount))
-                                (* ps_supplycost l_quantity))}]
-           [:join [{s_nationkey n_nationkey}]
-            [:join [{l_orderkey o_orderkey}]
-             [:join [{l_suppkey s_suppkey}]
-              [:join [{l_partkey ps_partkey} {l_suppkey ps_suppkey}]
-               [:join [{p_partkey l_partkey}]
-                [:scan part [p_partkey {p_name (like p_name "%green%")}]]
-                [:scan
-                 lineitem
-                 [l_orderkey l_extendedprice l_discount l_suppkey l_partkey l_quantity]]]
-               [:scan partsupp [ps_partkey ps_suppkey ps_supplycost]]]
-              [:scan supplier [s_suppkey s_nationkey]]]
-             [:scan orders [o_orderkey o_orderdate]]]
-            [:scan nation [n_name n_nationkey]]]]]]]
+  (-> '[:order [nation [o_year :desc]]
+        [:group [nation
+                 {o_year (extract :year o_orderdate)
+                  sum_profit (sum (- (* l_extendedprice (- 1 l_discount))
+                                     (* ps_supplycost l_quantity)))}]
+         [:where [(like? p_name "%green%")]
+          [:match [(part {:id p, :p_name p_name})
+                   (partsupp {:ps_suppkey s, :ps_partkey p})
+                   (supplier {:id s, :s_nationkey n})
+                   (lineitem [{:l_suppkey s, :l_partkey p, :l_orderkey o}
+                              l_extendedprice l_discount])
+                   (orders [{:id o} o_orderdate])
+                   (nation {:id n, :n_name nation})]]]]]
       #_
       (with-params {'?color "green"})))
 
-#_
 (def q10-returned-item-reporting
   (-> '[:top {:limit 20}
-        [:order-by [[revenue {:direction :desc}]]
-         [:group-by [c_custkey c_name c_acctbal c_phone n_name c_address c_comment
-                     {revenue (sum disc_price)}]
-          [:project [c_custkey c_name c_acctbal c_phone n_name c_address c_comment
-                     {disc_price (* l_extendedprice (- 1 l_discount))}]
-           [:join [{c_nationkey n_nationkey}]
-            [:join [{o_orderkey l_orderkey}]
-             [:join [{c_custkey o_custkey}]
-              [:scan customer [c_custkey c_name c_acctbal c_address c_phone c_comment c_nationkey]]
-              [:scan
-               orders
-               [o_orderkey o_custkey
-                {o_orderdate (and (>= o_orderdate ?start-date)
-                                  (< o_orderdate ?end-date))}]]]
-             [:scan
-              lineitem
-              [l_orderkey {l_returnflag (= l_returnflag "R")} l_extendedprice l_discount]]]
-            [:scan nation [n_nationkey n_name]]]]]]]
-      (with-params {'?start-date #time/date "1993-10-01"
-                    '?end-date #time/date "1994-01-01"})))
+        [:order [[revenue :desc]]
+         [:group [c_custkey c_name c_acctbal c_phone n_name c_address c_comment
+                  {revenue (sum (* l_extendedprice (- 1 l_discount)))}]
+          [:where [(>= o_orderdate $date)
+                   (< o_orderdate (+ $date #time/period "P3M"))]
+           [:match [(customer [{:id c, :c_nationkey n}
+                               c_name c_acctbal c_address c_phone c_comment])
+                    (order [{:id o, :o_custkey c} o_orderdate])
+                    (lineitem {:l_orderkey o, :l_returnflag "R"})
+                    (nation [{:id n} n_name])]]]]]]
+      (with-params {:date #time/date "1993-10-01"})))
 
 (def q11-important-stock-identification
   (-> '[:order-by [[value :desc]]
@@ -456,11 +413,11 @@
    #'q3-shipping-priority
    #'q4-order-priority-checking
    #'q5-local-supplier-volume
-   #_#'q6-forecasting-revenue-change
-   #_#'q7-volume-shipping
-   #_#'q8-national-market-share
-   #_#'q9-product-type-profit-measure
-   #_#'q10-returned-item-reporting
+   #'q6-forecasting-revenue-change
+   #'q7-volume-shipping
+   #'q8-national-market-share
+   #'q9-product-type-profit-measure
+   #'q10-returned-item-reporting
    #'q11-important-stock-identification
    #'q12-shipping-modes-and-order-priority
    #'q13-customer-distribution

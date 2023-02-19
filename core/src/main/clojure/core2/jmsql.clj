@@ -1,7 +1,8 @@
 (ns core2.jmsql
   (:require [clojure.spec.alpha :as s]
             [core2.error :as err]
-            [core2.qgm :as qgm])
+            [core2.qgm :as qgm]
+            [clojure.string :as str])
   (:import [clojure.lang MapEntry]
            java.util.concurrent.atomic.AtomicInteger))
 
@@ -12,13 +13,30 @@
 (s/def ::table simple-symbol?)
 (s/def ::attr keyword?)
 (s/def ::literal any?)
+(s/def ::param (s/and simple-symbol? #(str/starts-with? (name %) "$")))
 (s/def ::logic-var simple-symbol?)
 
 (s/def ::query
   (s/multi-spec query-spec (fn [v t] [t v])))
 
+(defmulti sub-query-spec first, :default ::default)
+
+(defmethod sub-query-spec :using [_]
+  (s/cat :op #{:using}
+         :correlated-vars (s/coll-of ::logic-var, :kind set?)
+         :query ::query))
+
+(defmethod sub-query-spec ::default [_] ::query)
+
+(s/def ::sub-query
+  (s/multi-spec sub-query-spec (fn [v t] [t v])))
+
+(s/conform ::sub-query '[:project [foo bar]])
+
 (s/def ::match-value
-  (s/or :logic-var ::logic-var, :literal ::literal))
+  (s/or :param ::param
+        :logic-var ::logic-var
+        :literal ::literal))
 
 (s/def ::single-map-match
   (-> (s/map-of ::attr ::match-value)
@@ -65,10 +83,11 @@
          (s/cat :f simple-symbol?, :args (s/* ::form))))
 
 (s/def ::form
-  (s/or :literal (some-fn number? string? keyword?)
-        :symbol simple-symbol?
-        :sub-query (s/and list? (s/cat :q #{'q}, :sub-query ::query))
-        :call (s/spec ::call)))
+  (s/or :param ::param
+        :logic-var ::logic-var
+        :sub-query (s/and list? (s/cat :q #{'q}, :sub-query ::sub-query))
+        :call (s/spec ::call)
+        :literal ::literal))
 
 (s/def ::where-clause ::form)
 
@@ -153,7 +172,7 @@
     [:scan (symbol table) (-> var->cols (update-vals first))
      (vec (concat (->> match-cols
                        (keep (fn [[a [v-tag :as v]]]
-                               (when (= :literal v-tag)
+                               (when (or (= :literal v-tag) (= :param v-tag))
                                  [:call '= a v]))))
                   (->unify-preds var->cols)))]))
 
@@ -207,7 +226,8 @@
           (plan* [sq-type [form-tag form-arg]]
             (case form-tag
               :literal [:literal form-arg]
-              :symbol (var->col form-arg)
+              :param [:param form-arg]
+              :logic-var (var->col form-arg)
               :sub-query (plan-sq sq-type (:sub-query form-arg))
               :call (plan-call form-arg)))]
 
@@ -272,16 +292,13 @@
                  (mapv (fn [[tag arg]]
                          (case tag
                            :form [:form (plan-form unq-var->col sq-idx arg)]
-                           :named [:named (-> arg (update-vals (partial plan-form unq-var->col)))]))))
+                           :named [:named (-> arg (update-vals (partial plan-form unq-var->col sq-idx)))]))))
      (plan-query query)]))
 
 (comment
-  (compile-query '[:where [(> id 4)
-                           (< uid 2)
-                           (in? uid (q [:match [(admin-users [uid])]]))
-                           (exists? (q [:match [(mgmt-users [uid])]]))]
-                   [:match [(users [uid])
-                            (products [id])]]]))
+  (compile-query '[:where [(> id $id)]
+                   [:match [(users [id])
+                            (products [{:id $pid}])]]]))
 
 (defn compile-query [query]
   (-> (conform-query query)
