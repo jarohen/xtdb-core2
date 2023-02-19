@@ -2,7 +2,8 @@
   (:require [clojure.spec.alpha :as s]
             [core2.error :as err]
             [core2.qgm :as qgm])
-  (:import [clojure.lang MapEntry]))
+  (:import [clojure.lang MapEntry]
+           java.util.concurrent.atomic.AtomicInteger))
 
 (defmulti query-spec first)
 (defmulti plan-query :op)
@@ -61,12 +62,12 @@
 
 (s/def ::call
   (s/and list?
-         (s/cat :f simple-symbol?
-                :args (s/* ::form))))
+         (s/cat :f simple-symbol?, :args (s/* ::form))))
 
 (s/def ::form
   (s/or :literal (some-fn number? string? keyword?)
         :symbol simple-symbol?
+        :sub-query (s/and list? (s/cat :q #{'q}, :sub-query ::query))
         :call (s/spec ::call)))
 
 (s/def ::where-clause ::form)
@@ -174,14 +175,35 @@
      (->unify-preds var->cols)
      qs]))
 
-(defn- unform-form [var->col form]
-  (letfn [(unform* [[form-tag form-arg]]
-            (case form-tag
-              :literal [:literal form-arg]
-              :symbol (var->col form-arg)
-              :call (let [{:keys [f args]} form-arg]
-                      (into [:call f] (mapv unform* args)))))]
-    (unform* form)))
+(def plan-sqs-xf
+  (mapcat (comp ::sub-queries meta)))
+
+(defn- plan-form [var->col form]
+  (let [idx (AtomicInteger. 0)]
+    (letfn [(sq-sym [] (symbol (str "sq" (.getAndIncrement idx))))
+
+            (with-sq-meta [plan arg-plans]
+              (-> plan
+                  (vary-meta (fnil into {}) {::sub-queries (into {} plan-sqs-xf arg-plans)})))
+
+            (plan-sq [sq]
+              (let [qsym (sq-sym)
+                    sq-plan (plan-query sq)
+                    sq-vars (qgm/box-vars sq-plan)]
+                (assert (= 1 (count sq-vars)))
+                (-> [:q-column qsym (first sq-vars)]
+                    (with-meta {::sub-queries {qsym [:scalar sq-plan]}}))))
+
+            (plan* [[form-tag form-arg]]
+              (case form-tag
+                :literal [:literal form-arg]
+                :symbol (var->col form-arg)
+                :sub-query (plan-sq (:sub-query form-arg))
+                :call (let [{:keys [f args]} form-arg
+                            arg-plans (mapv plan* args)]
+                        (-> (into [:call f] arg-plans)
+                            (with-sq-meta arg-plans)))))]
+      (plan* form))))
 
 (defn- unq-var->col [lv] [:column lv])
 (defn- single-q-var->col [lv] [:q-column 'q lv])
@@ -189,17 +211,17 @@
 (defmethod plan-query :where [{:keys [clauses query]}]
   (let [plan (plan-query query)]
     (if (= :select (first plan))
-      (let [[_ head preds qs] plan]
+      (let [[_ head preds qs] plan
+            clause-plans (mapv (partial plan-form head) clauses)]
         [:select head
-         (into preds
-               (map (partial unform-form head))
-               clauses)
-         qs])
+         (into preds clause-plans)
+         (into qs plan-sqs-xf clause-plans)])
 
-      [:select (->> (qgm/box-vars plan)
-                    (into {} (map (juxt identity single-q-var->col))))
-       (->> clauses (mapv (partial unform-form single-q-var->col)))
-       {'q plan}])))
+      (let [clause-plans (->> clauses (mapv (partial plan-form single-q-var->col)))]
+        [:select (->> (qgm/box-vars plan)
+                      (into {} (map (juxt identity single-q-var->col))))
+         clause-plans
+         (into {'q plan} plan-sqs-xf clause-plans)]))))
 
 (defmethod plan-query :project [{:keys [clauses query]}]
   (let [plan (plan-query query)
@@ -215,26 +237,31 @@
                               :column (-> acc (assoc p-arg (single-q-var->col p-arg)))
                               :extends (into acc
                                              (map (fn [[out-col form]]
-                                                    [out-col [:extends (unform-form var->col form)]]))
+                                                    (let [form-plan (plan-form var->col form)]
+                                                      (MapEntry/create out-col [:extends form-plan]))))
                                              p-arg)))
                           {}))]
     [:select projections
      []
-     {'q [:foreach plan]}]))
+     (into {'q [:foreach plan]} plan-sqs-xf projections)]))
+
+#_
+(compile-query '[:project [{foo (q [:match [(a [bar])]])}]
+                 [:match [(b [b c])]]])
 
 (defmethod plan-query :top [{:keys [top-params query]}]
   [:top top-params (plan-query query)])
 
 (defmethod plan-query :order [{:keys [order-specs query]}]
-  [:order (mapv (juxt (comp (partial unform-form unq-var->col) :value) :direction) order-specs)
+  [:order (mapv (juxt (comp (partial plan-form unq-var->col) :value) :direction) order-specs)
    (plan-query query)])
 
 (defmethod plan-query :group [{:keys [group-specs query]}]
   [:group (->> group-specs
                (mapv (fn [[tag arg]]
                        (case tag
-                         :form [:form (unform-form unq-var->col arg)]
-                         :named [:named (-> arg (update-vals (partial unform-form unq-var->col)))]))))
+                         :form [:form (plan-form unq-var->col arg)]
+                         :named [:named (-> arg (update-vals (partial plan-form unq-var->col)))]))))
    (plan-query query)])
 
 (comment
@@ -243,7 +270,8 @@
                     [:group [id {c (count id2)}]
                      [:project [* id {id2 (* id 2)}]
                       [:where [(> id 4)
-                               (< uid 2)]
+                               (< uid 2)
+                               (in? uid (q [:match [(admin-users [uid])]]))]
                        [:match [(users [uid])
                                 (products [id])]]]]]]]))
 
