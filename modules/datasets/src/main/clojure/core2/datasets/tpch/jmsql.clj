@@ -29,12 +29,12 @@
                   s_address s_phone s_comment]
         [:order [[s_acctbal :desc] n_name s_name p_partkey]
          [:where [(= ps_supplycost
-                     (q [:using #{p}
-                         [:group [{min_cost (min ps_supplycost)}]
-                          [:match [(partsupp [{:ps_partkey p, :ps_suppkey s} ps_supplycost])
-                                   (supplier {:id s, :s_nationkey n})
-                                   (nation {:id n, :n_regionkey r})
-                                   (region {:id r, :r_name $region})]]]]))
+                     (q #{p}
+                        [:group [{min_cost (min ps_supplycost)}]
+                         [:match [(partsupp [{:ps_partkey p, :ps_suppkey s} ps_supplycost])
+                                  (supplier {:id s, :s_nationkey n})
+                                  (nation {:id n, :n_regionkey r})
+                                  (region {:id r, :r_name $region})]]]))
                   (like? p_type "%BRASS")]
           [:match [(part [{:id p, :p_size $size} p_type])
                    (partsupp [{:ps_partkey p, :ps_suppkey s} ps_supplycost])
@@ -54,8 +54,6 @@
                    (order [{:id o, :o_custkey c} o_orderdate o_shippriority])
                    (lineitem [{:l_orderkey o} l_shipdate l_extendedprice l_discount])]]]]]
       (with-params {:segment "BUILDING", :date #time/date "1995-03-15"})))
-
-(jmsql/compile-query q3-shipping-priority)
 
 (def q4-order-priority-checking
   (-> '[:order [o_orderpriority]
@@ -208,32 +206,29 @@
       (with-params {:ship-modes ["MAIL" "SHIP"]
                     :date #time/date "1994-01-01"})))
 
+#_ ; TODO `:left-join`
+;; do we want to include `c` or have it unified?
 (def q13-customer-distribution
   '[:order-by [[custdist :desc] [c_count :desc]]
     [:group [c_count {custdist (count *)}]
      [:group [c {c_count (count o)}]
-      [:left-join [c (not (like? o_comment "%special%requests%"))]
+      [:left-join [c
+                   (not (like? o_comment "%special%requests%"))]
        [:match [(customer {:id c})]]
        [:match [(order [{:o_custkey c} o_comment])]]]]]])
 
-#_
 (def q14-promotion-effect
-  (-> '[:project [{promo_revenue (* 100 (/ promo_revenue revenue))}]
-        [:group-by [{promo_revenue (sum promo_disc_price)}
-                    {revenue (sum disc_price)}]
-         [:project [{promo_disc_price (if (like p_type "PROMO%")
-                                        (* l_extendedprice (- 1 l_discount))
-                                        0.0)}
-                    {disc_price (* l_extendedprice (- 1 l_discount))}]
-          [:join [{p_partkey l_partkey}]
-           [:scan part [p_partkey p_type]]
-           [:scan
-            lineitem
-            [l_partkey l_extendedprice l_discount
-             {l_shipdate (and (>= l_shipdate ?start-date)
-                              (< l_shipdate ?end-date))}]]]]]]
-      (with-params {'?start-date #time/date "1995-09-01"
-                    '?end-date #time/date "1995-10-01"})))
+  (-> '[:group [{promo_revenue
+                 (* 100 (/ (sum (if (like p_type "PROMO%")
+                                  (* l_extendedprice (- 1 l_discount))
+                                  0.0))
+                           (sum (* l_extendedprice (- 1 l_discount)))))}]
+        [:where [(and (>= l_shipdate $date)
+                      (< l_shipdate (+ $date #time/period "P1M")))]
+         [:match [(part [{:id p} p_type])
+                  (lineitem [{:l_partkey p}
+                             l_extendedprice l_discount l_shipdate])]]]]
+      (with-params {:date #time/date "1995-09-01"})))
 
 (def q15-top-supplier
   (-> '[:with [[revenue
@@ -252,64 +247,48 @@
                    (revenue [{:supplier_no s} total_revenue])]]]]]
       (with-params {:date #time/date "1996-01-01"})))
 
-#_
 (def q16-part-supplier-relationship
-  (-> '[:order-by [[supplier_cnt {:direction :desc}] [p_brand] [p_type] [p_size]]
-        [:group-by [p_brand p_type p_size {supplier_cnt (count ps_suppkey)}]
-         [:distinct
-          [:project [p_brand p_type p_size ps_suppkey]
-           [:join [{p_partkey ps_partkey}]
-            [:semi-join [{p_size p_size}]
-             [:scan
-              part
-              [p_partkey {p_brand (<> p_brand ?brand)} {p_type (not (like p_type "MEDIUM POLISHED%"))} p_size]]
-             [:table ?sizes]]
-            [:anti-join [{ps_suppkey s_suppkey}]
-             [:scan partsupp [ps_partkey ps_suppkey]]
-             [:scan supplier [s_suppkey {s_comment (like s_comment "%Customer%Complaints%")}]]]]]]]]
-      (with-meta {::params {'?brand "Brand#45"
-                            ;; '?type "MEDIUM POLISHED%"
-                            }
-                  ::table-args {'?sizes [{:p_size 49}
-                                         {:p_size 14}
-                                         {:p_size 23}
-                                         {:p_size 45}
-                                         {:p_size 19}
-                                         {:p_size 3}
-                                         {:p_size 36}
-                                         {:p_size 9}]}})))
+  (-> '[:order [[supplier_cnt :desc] p_brand p_type p_size]
+        [:group [p_brand p_type p_size {supplier_cnt (count-distinct ps_suppkey)}]
+         [:where [(<> p_brand $brand)
+                  (in? p_size $sizes)
+                  (not (like? p_type "MEDIUM POLISHED%"))
+                  (not-in? ps_suppkey
+                           (q [:project [s]
+                               [:where [(not (like? s_comment "%Customer%Complaints%"))]
+                                [:match [(supplier [{:id s} s_comment])]]]]))]
+          [:match [(part [{:id p} p_brand p_type p_size p_suppkey])
+                   (partsupp [{:ps_partkey p} ps_suppkey])]]]]]
+      (with-params {:brand "Brand#45"
+                    :sizes [49 14 23 45 19 3 36 9]})))
 
-#_
+#_ ; TODO QGM for `:group`, and correlated sub-query
 (def q17-small-quantity-order-revenue
-  (-> '[:project [{avg_yearly (/ sum_extendedprice 7)}]
-        [:group-by [{sum_extendedprice (sum l_extendedprice)}]
-         [:join [{p_partkey l_partkey} (< l_quantity small_avg_qty)]
-          [:scan
-           part
-           [p_partkey {p_brand (= p_brand ?brand)} {p_container (= p_container ?container)}]]
-          [:join [{l_partkey l_partkey}]
-           [:project [l_partkey {small_avg_qty (* 0.2 avg_qty)}]
-            [:group-by [l_partkey {avg_qty (avg l_quantity)}]
-             [:scan lineitem [l_partkey l_quantity]]]]
-           [:scan lineitem [l_partkey l_quantity]]]]]]
-      (with-params {'?brand "Brand#23"
-                    '?container "MED_BOX"})))
+  (-> '[:group [{avg_yearly (/ (sum l_extendedprice) 7)}]
+        [:where [(< l_quantity (q #{p}
+                                  [:group [(* 0.2 (avg l_quantity))]
+                                   [:match [(lineitem [{:l_partkey p} l_quantity])]]]))]
+         [:match [(lineitem [{:l_partkey p} l_quantity])
+                  (part [{:id p, :p_brand $brand, :p_container $container}])]]]]
+      (with-params {:brand "Brand#23"
+                    :container "MED_BOX"})))
 
-#_
+#_ ; TODO QGM for `:group`
 (def q18-large-volume-customer
   (-> '[:top {:limit 100}
-        [:order-by [[o_totalprice {:direction :desc}] [o_orderdate {:direction :desc}]]
-         [:group-by [c_name c_custkey o_orderkey o_orderdate o_totalprice {sum_qty (sum l_quantity)}]
-          [:join [{o_orderkey l_orderkey}]
-           [:join [{o_custkey c_custkey}]
-            [:semi-join [{o_orderkey l_orderkey}]
-             [:scan orders [o_orderkey o_custkey o_orderdate o_totalprice]]
-             [:select (> sum_qty ?qty)
-              [:group-by [l_orderkey {sum_qty (sum l_quantity)}]
-               [:scan lineitem [l_orderkey l_quantity]]]]]
-            [:scan customer [c_name c_custkey]]]
-           [:scan lineitem [l_orderkey l_quantity]]]]]]
-      (with-params {'?qty 300})))
+        [:order [[o_totalprice :desc] [o_orderdate :desc]]
+         [:group [c_name c_custkey o_orderkey o_orderdate o_totalprice
+                  {sum_qty (sum l_quantity)}]
+          [:where [(in? o_orderkey
+                        (q [:project [o]
+                            [:where [(> sum_qty $qty)]
+                             [:group [o {sum_qty (sum l_quantity)}]
+                              [:match [(lineitem [{:l_orderkey o} l_quantity])]]]]]))]
+           [:match [(customer [{:id c_custkey} c_name])
+                    (orders [{:id o_orderkey, :o_custkey c_custkey}
+                             o_orderdate o_totalprice])
+                    (lineitem [{:l_orderkey o_orderkey} l_quantity])]]]]]]
+      (with-params {:qty 300})))
 
 (def q19-discounted-revenue
   (-> '[:group [{revenue (sum (* l_extendedprice (- 1 l_discount)))}]
@@ -333,30 +312,33 @@
       (with-params {:quantity1 1, :quantity2 10, :quantity3 20
                     :brand1 "Brand#12", :brand2 "Brand23", :brand3 "Brand#34"})))
 
-#_
+#_ ; TODO correlated sub-query
 (def q20-potential-part-promotion
-  (-> '[:order-by [[s_name]]
+  (-> '[:order [s_name]
         [:project [s_name s_address]
-         [:semi-join [{s_suppkey ps_suppkey}]
-          [:join [{n_nationkey s_nationkey}]
-           [:scan nation [{n_name (= n_name ?nation)} n_nationkey]]
-           [:scan supplier [s_name s_address s_nationkey s_suppkey]]]
-          [:join [{ps_partkey l_partkey} {ps_suppkey l_suppkey} (> ps_availqty sum_qty)]
-           [:semi-join [{ps_partkey p_partkey}]
-            [:scan partsupp [ps_suppkey ps_partkey ps_availqty]]
-            [:scan part [p_partkey {p_name (like p_name "forest%")}]]]
-           [:project [l_partkey l_suppkey {sum_qty (* 0.5 sum_qty)}]
-            [:group-by [l_partkey l_suppkey {sum_qty (sum l_quantity)}]
-             [:scan lineitem
-              [l_partkey l_suppkey l_quantity
-               {l_shipdate (and (>= l_shipdate ?start-date)
-                                (< l_shipdate ?end-date))}]]]]]]]]
-      (with-params {;'?color "forest"
-                    '?start-date #time/date "1994-01-01"
-                    '?end-date #time/date "1995-01-01"
-                    '?nation "CANADA"})))
+         [:where
+          [(in? s
+                (q #{s}
+                   [:project [s]
+                    [:where
+                     [(> ps_availqty
+                         (q #{p s}
+                            [:group [(* 0.5 (sum l_quantity))]
+                             [:where [(>= l_shipdate $date)
+                                      (< l_shipdate (+ $date #time/period "P1Y"))]
+                              [:match [(lineitem [{:l_partkey p, :l_suppkey s}
+                                                  l_shipdate])]]]]))]
 
-#_
+                     [:match [(partsupp [{:ps_suppkey s, :ps_partkey p}
+                                         ps_availqty])]]]]))]
+
+          [:match [(supplier {:id s, :s_nationkey n})
+                   (nation [{:id n, :n_name $nation}])]]]]]
+
+      (with-params {:date #time/date "1994-01-01"
+                    :nation "CANADA"})))
+
+#_ ; TODO `:assign`
 (def q21-suppliers-who-kept-orders-waiting
   (-> '[:assign [L1 [:join [{l1_l_orderkey l2_l_orderkey} (<> l1_l_suppkey l2_l_suppkey)]
                      [:join [{l1_l_suppkey s_suppkey}]
@@ -384,7 +366,7 @@
                  [:scan lineitem [l_orderkey l_suppkey l_receiptdate l_commitdate]]]]]]]]]]]]
       (with-params {'?nation "SAUDI ARABIA"})))
 
-#_
+#_ ; TODO `:assign`
 (def q22-global-sales-opportunity
   (-> '[:assign [Customer [:semi-join [{cntrycode cntrycode}]
                            [:project [c_custkey {cntrycode (substring c_phone 1 2 true)} c_acctbal]
@@ -420,10 +402,10 @@
    #'q10-returned-item-reporting
    #'q11-important-stock-identification
    #'q12-shipping-modes-and-order-priority
-   #'q13-customer-distribution
-   #_#'q14-promotion-effect
+   #_#'q13-customer-distribution
+   #'q14-promotion-effect
    #'q15-top-supplier
-   #_#'q16-part-supplier-relationship
+   #'q16-part-supplier-relationship
    #_#'q17-small-quantity-order-revenue
    #_#'q18-large-volume-customer
    #'q19-discounted-revenue

@@ -21,18 +21,6 @@
 
 (defmulti sub-query-spec first, :default ::default)
 
-(defmethod sub-query-spec :using [_]
-  (s/cat :op #{:using}
-         :correlated-vars (s/coll-of ::logic-var, :kind set?)
-         :query ::query))
-
-(defmethod sub-query-spec ::default [_] ::query)
-
-(s/def ::sub-query
-  (s/multi-spec sub-query-spec (fn [v t] [t v])))
-
-(s/conform ::sub-query '[:project [foo bar]])
-
 (s/def ::match-value
   (s/or :param ::param
         :logic-var ::logic-var
@@ -82,10 +70,16 @@
   (s/and list?
          (s/cat :f simple-symbol?, :args (s/* ::form))))
 
+(s/def ::sub-query
+  (s/and list?
+         (s/cat :q #{'q},
+                :using (s/coll-of ::logic-var, :kind set?)
+                :sub-query ::query)))
+
 (s/def ::form
   (s/or :param ::param
         :logic-var ::logic-var
-        :sub-query (s/and list? (s/cat :q #{'q}, :sub-query ::sub-query))
+        :sub-query (s/spec ::sub-query)
         :call (s/spec ::call)
         :literal ::literal))
 
