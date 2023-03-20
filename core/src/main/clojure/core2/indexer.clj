@@ -163,10 +163,33 @@
 
         nil))))
 
+(defn- ->match-indexer ^core2.indexer.OpIndexer [^IInternalIdManager iid-mgr, ^IRaQuerySource ra-src, wm-src, ^ILiveChunkTx live-chunk,
+                                                 ^DenseUnionVector tx-ops-vec, ^Instant current-time]
+  (let [match-vec (.getStruct tx-ops-vec 3)
+        ^VarCharVector table-vec (.getChild match-vec "table" VarCharVector)
+        ^DenseUnionVector id-vec (.getChild match-vec "id" DenseUnionVector)
+        ^DenseUnionVector doc-duv (.getChild match-vec "document" DenseUnionVector)
+        ^TimeStampVector app-time-vec (.getChild match-vec "at_application_time")
+        current-time-µs (util/instant->micros current-time)]
+    (reify OpIndexer
+      (indexOp [_ tx-op-idx]
+        (let [match-offset (.getOffset tx-ops-vec tx-op-idx)
+              table (t/get-object table-vec match-offset)
+              eid (t/get-object id-vec match-offset)
+              new-entity? (not (.isKnownId iid-mgr table eid))
+              app-time (if (.isNull app-time-vec match-offset)
+                         current-time-µs
+                         (.get app-time-vec match-offset))]
+
+          ;; TODO much easier with scan-*, I suspect
+          )
+
+        nil))))
+
 (defn- ->evict-indexer ^core2.indexer.OpIndexer [^IInternalIdManager iid-mgr ^ILogOpIndexer log-op-idxer, ^ITemporalTxIndexer temporal-idxer, ^ILiveChunkTx live-chunk
                                                  ^DenseUnionVector tx-ops-vec]
 
-  (let [evict-vec (.getStruct tx-ops-vec 3)
+  (let [evict-vec (.getStruct tx-ops-vec 4)
         ^VarCharVector table-vec (.getChild evict-vec "_table" VarCharVector)
         ^DenseUnionVector id-vec (.getChild evict-vec "id" DenseUnionVector)]
     (reify OpIndexer
@@ -244,7 +267,7 @@
 
 (defn- ->call-indexer ^core2.indexer.OpIndexer [allocator, ra-src, wm-src
                                                 ^DenseUnionVector tx-ops-vec, {:keys [tx-key] :as tx-opts}]
-  (let [call-vec (.getStruct tx-ops-vec 4)
+  (let [call-vec (.getStruct tx-ops-vec 5)
         ^DenseUnionVector fn-id-vec (.getChild call-vec "fn-id" DenseUnionVector)
         ^ListVector args-vec (.getChild call-vec "args" ListVector)
 
@@ -515,6 +538,7 @@
         (letfn [(index-tx-ops [^DenseUnionVector tx-ops-vec]
                   (let [!put-idxer (delay (->put-indexer iid-mgr log-op-idxer temporal-idxer live-chunk-tx tx-ops-vec sys-time))
                         !delete-idxer (delay (->delete-indexer iid-mgr log-op-idxer temporal-idxer live-chunk-tx tx-ops-vec sys-time))
+                        !match-idxer (delay (->match-indexer iid-mgr ra-src wm-src live-chunk-tx tx-ops-vec sys-time))
                         !evict-idxer (delay (->evict-indexer iid-mgr log-op-idxer temporal-idxer live-chunk-tx tx-ops-vec))
                         !call-idxer (delay (->call-indexer allocator ra-src wm-src tx-ops-vec tx-opts))
                         !sql-idxer (delay (->sql-indexer allocator metadata-mgr buffer-pool iid-mgr
@@ -525,9 +549,10 @@
                                                0 (.indexOp ^OpIndexer @!sql-idxer tx-op-idx)
                                                1 (.indexOp ^OpIndexer @!put-idxer tx-op-idx)
                                                2 (.indexOp ^OpIndexer @!delete-idxer tx-op-idx)
-                                               3 (.indexOp ^OpIndexer @!evict-idxer tx-op-idx)
-                                               4 (.indexOp ^OpIndexer @!call-idxer tx-op-idx)
-                                               5 (throw abort-exn))]
+                                               3 (.indexOp ^OpIndexer @!match-idxer tx-op-idx)
+                                               4 (.indexOp ^OpIndexer @!evict-idxer tx-op-idx)
+                                               5 (.indexOp ^OpIndexer @!call-idxer tx-op-idx)
+                                               6 (throw abort-exn))]
                         (try
                           (index-tx-ops more-tx-ops)
                           (finally
