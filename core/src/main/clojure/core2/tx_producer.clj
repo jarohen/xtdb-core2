@@ -25,6 +25,7 @@
 (s/def ::id any?)
 (s/def ::doc (s/keys :req-un [::id]))
 (s/def ::table simple-symbol?)
+(s/def ::at-app-time ::util/datetime-value)
 (s/def ::app-time-start ::util/datetime-value)
 (s/def ::app-time-end ::util/datetime-value)
 
@@ -50,6 +51,13 @@
          :table ::table
          :id ::id
          :app-time-opts (s/? (s/keys :opt-un [::app-time-start ::app-time-end]))))
+
+(defmethod tx-op-spec :match [_]
+  (s/cat :op #{:match}
+         :table ::table
+         :id ::id
+         :doc (s/nilable ::doc)
+         :app-time-opts (s/? (s/keys :opt-un [::at-app-time]))))
 
 (defmethod tx-op-spec :evict [_]
   ;; eventually this could have app-time/sys start/end?
@@ -100,6 +108,12 @@
                                 (types/->field "id" types/dense-union-type false)
                                 (types/col-type->field 'application_time_start nullable-inst-type)
                                 (types/col-type->field 'application_time_end nullable-inst-type))
+
+                 (types/->field "match" types/struct-type false
+                                (types/col-type->field 'table :utf8)
+                                (types/->field "id" types/dense-union-type false)
+                                (types/->field "document" types/dense-union-type false)
+                                (types/col-type->field 'at_application_time nullable-inst-type))
 
                  (types/->field "evict" types/struct-type false
                                 (types/col-type->field '_table [:union #{:null :utf8}])
@@ -208,8 +222,35 @@
 
       (.endValue delete-writer))))
 
+(defn- ->match-writer [^IDenseUnionWriter tx-ops-writer]
+  (let [match-writer (.asStruct (.writerForTypeId tx-ops-writer 3))
+        table-writer (.writerForName match-writer "table")
+        id-writer (.asDenseUnion (.writerForName match-writer "id"))
+        doc-writer (.asDenseUnion (.writerForName match-writer "document"))
+        app-time-writer (.writerForName match-writer "at_application_time")]
+    (fn write-delete! [{:keys [id table doc],
+                        {:keys [at-app-time]} :app-time-opts}]
+      (.startValue match-writer)
+
+      (types/write-value! (name table) table-writer)
+
+      (doto (-> id-writer
+                (.writerForType (types/value->col-type id)))
+        (.startValue)
+        (->> (types/write-value! id))
+        (.endValue))
+
+      (doto (.writerForType doc-writer (types/value->col-type doc))
+        (.startValue)
+        (->> (types/write-value! doc))
+        (.endValue))
+
+      (types/write-value! at-app-time app-time-writer)
+
+      (.endValue match-writer))))
+
 (defn- ->evict-writer [^IDenseUnionWriter tx-ops-writer]
-  (let [evict-writer (.asStruct (.writerForTypeId tx-ops-writer 3))
+  (let [evict-writer (.asStruct (.writerForTypeId tx-ops-writer 4))
         table-writer (.writerForName evict-writer "_table")
         id-writer (.asDenseUnion (.writerForName evict-writer "id"))]
     (fn [{:keys [id table]}]
@@ -223,7 +264,7 @@
       (.endValue evict-writer))))
 
 (defn- ->call-writer [^IDenseUnionWriter tx-ops-writer]
-  (let [call-writer (.asStruct (.writerForTypeId tx-ops-writer 4))
+  (let [call-writer (.asStruct (.writerForTypeId tx-ops-writer 5))
         fn-id-writer (.asDenseUnion (.writerForName call-writer "fn-id"))
         args-list-writer (.asList (.writerForName call-writer "args"))]
     (fn write-call! [{:keys [fn-id args]}]
@@ -239,7 +280,7 @@
       (.endValue call-writer))))
 
 (defn- ->abort-writer [^IDenseUnionWriter tx-ops-writer]
-  (let [abort-writer (.writerForTypeId tx-ops-writer 5)]
+  (let [abort-writer (.writerForTypeId tx-ops-writer 6)]
     (fn [_]
       (.startValue abort-writer)
       (.endValue abort-writer))))
@@ -254,6 +295,7 @@
         write-sql! (->sql-writer tx-ops-writer allocator)
         write-put! (->put-writer tx-ops-writer)
         write-delete! (->delete-writer tx-ops-writer)
+        write-match! (->match-writer tx-ops-writer)
         write-evict! (->evict-writer tx-ops-writer)
         write-call! (->call-writer tx-ops-writer)
         write-abort! (->abort-writer tx-ops-writer)]
@@ -266,6 +308,7 @@
           :sql (write-sql! tx-op)
           :put (write-put! tx-op)
           :delete (write-delete! tx-op)
+          :match (write-match! tx-op)
           :evict (write-evict! tx-op)
           :call (write-call! tx-op)
           :abort (write-abort! tx-op)))

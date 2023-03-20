@@ -12,7 +12,7 @@
         "type" : {
           "name" : "union",
           "mode" : "Dense",
-          "typeIds" : [0,1,2,3,4,5]
+          "typeIds" : [0,1,2,3,4,5,6]
         },
         "children" : [{
           "name" : "sql",
@@ -421,6 +421,98 @@
             "children" : [ ]
           }]
         },{
+          "name" : "match",
+          "nullable" : false,
+          "type" : {
+            "name" : "struct"
+          },
+          "children" : [{
+            "name" : "table",
+            "nullable" : false,
+            "type" : {
+              "name" : "utf8"
+            },
+            "children" : [ ]
+          },{
+            "name" : "id",
+            "nullable" : false,
+            "type" : {
+              "name" : "union",
+              "mode" : "Dense",
+              "typeIds" : [0]
+            },
+            "children" : [{
+              "name" : "keyword",
+              "nullable" : false,
+              "type" : {
+                "name" : "KeywordType"
+              },
+              "children" : [ ],
+              "metadata" : [{
+                "value" : "c2/clj-keyword",
+                "key" : "ARROW:extension:name"
+              },{
+                "value" : "",
+                "key" : "ARROW:extension:metadata"
+              }]
+            }]
+          },{
+            "name" : "document",
+            "nullable" : false,
+            "type" : {
+              "name" : "union",
+              "mode" : "Dense",
+              "typeIds" : [0,1]
+            },
+            "children" : [{
+              "name" : "null",
+              "nullable" : true,
+              "type" : {
+                "name" : "null"
+              },
+              "children" : [ ]
+            },{
+              "name" : "struct1",
+              "nullable" : false,
+              "type" : {
+                "name" : "struct"
+              },
+              "children" : [{
+                "name" : "id",
+                "nullable" : false,
+                "type" : {
+                  "name" : "union",
+                  "mode" : "Dense",
+                  "typeIds" : [0]
+                },
+                "children" : [{
+                  "name" : "keyword",
+                  "nullable" : false,
+                  "type" : {
+                    "name" : "KeywordType"
+                  },
+                  "children" : [ ],
+                  "metadata" : [{
+                    "value" : "c2/clj-keyword",
+                    "key" : "ARROW:extension:name"
+                  },{
+                    "value" : "",
+                    "key" : "ARROW:extension:metadata"
+                  }]
+                }]
+              }]
+            }]
+          },{
+            "name" : "at_application_time",
+            "nullable" : true,
+            "type" : {
+              "name" : "timestamp",
+              "unit" : "MICROSECOND",
+              "timezone" : "UTC"
+            },
+            "children" : [ ]
+          }]
+        },{
           "name" : "evict",
           "nullable" : false,
           "type" : {
@@ -566,12 +658,12 @@
       "name" : "tx-ops",
       "count" : 1,
       "VALIDITY" : [1],
-      "OFFSET" : [0,10],
+      "OFFSET" : [0,12],
       "children" : [{
         "name" : "$data$",
-        "count" : 10,
-        "TYPE_ID" : [1,1,2,2,0,0,4,0,0,4],
-        "OFFSET" : [0,1,0,1,0,1,0,2,3,1],
+        "count" : 12,
+        "TYPE_ID" : [1,1,2,2,3,3,0,0,5,0,0,5],
+        "OFFSET" : [0,1,0,1,0,1,0,1,0,2,3,1],
         "children" : [{
           "name" : "sql",
           "count" : 4,
@@ -853,6 +945,60 @@
             "count" : 2,
             "VALIDITY" : [1,0],
             "DATA" : [1735689600000000,0]
+          }]
+        },{
+          "name" : "match",
+          "count" : 2,
+          "VALIDITY" : [1,1],
+          "children" : [{
+            "name" : "table",
+            "count" : 2,
+            "VALIDITY" : [1,1],
+            "OFFSET" : [0,7,14],
+            "DATA" : ["xt_docs","xt_docs"]
+          },{
+            "name" : "id",
+            "count" : 2,
+            "TYPE_ID" : [0,0],
+            "OFFSET" : [0,1],
+            "children" : [{
+              "name" : "keyword",
+              "count" : 2,
+              "VALIDITY" : [1,1],
+              "OFFSET" : [0,3,6],
+              "DATA" : ["foo","foo"]
+            }]
+          },{
+            "name" : "document",
+            "count" : 2,
+            "TYPE_ID" : [0,1],
+            "OFFSET" : [0,0],
+            "children" : [{
+              "name" : "null",
+              "count" : 1
+            },{
+              "name" : "struct1",
+              "count" : 1,
+              "VALIDITY" : [1],
+              "children" : [{
+                "name" : "id",
+                "count" : 1,
+                "TYPE_ID" : [0],
+                "OFFSET" : [0],
+                "children" : [{
+                  "name" : "keyword",
+                  "count" : 1,
+                  "VALIDITY" : [1],
+                  "OFFSET" : [0,3],
+                  "DATA" : ["foo"]
+                }]
+              }]
+            }]
+          },{
+            "name" : "at_application_time",
+            "count" : 2,
+            "VALIDITY" : [0,1],
+            "DATA" : [0,1577836800000000]
           }]
         },{
           "name" : "evict",

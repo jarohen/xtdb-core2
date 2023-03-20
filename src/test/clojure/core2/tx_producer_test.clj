@@ -41,6 +41,9 @@
 
                    [:delete 'xt_docs "reading-demo000000"]
 
+                   [:match 'xt_docs :foo nil]
+                   [:match 'xt_docs :foo {:id :foo} {:at-app-time #inst "2020"}]
+
                    [:sql "INSERT INTO foo (id) VALUES (0)"]
 
                    [:sql "INSERT INTO foo (id, foo, bar) VALUES (?, ?, ?)"
